@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import reactor.core.publisher.Flux;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -44,7 +45,7 @@ public class SearchService {
         String normalizedKeyword = keyword == null ? "" : keyword.trim();
         String normalizedCity = city == null ? "" : city.trim();
         String normalizedTypes = types == null ? "" : types.trim();
-        String listKey = buildListCacheKey(normalizedKeyword, normalizedCity, normalizedTypes);
+//        String listKey = buildListCacheKey(normalizedKeyword, normalizedCity, normalizedTypes);
         String pageKey = buildPageCacheKey(normalizedKeyword, normalizedCity, normalizedTypes, page, size);
         PagedResult<SuggestItem> cachedPage = getCachedPage(pageKey);
         log.info("使用缓存：{}", cachedPage != null);
@@ -52,31 +53,36 @@ public class SearchService {
             cachedPage.setFromCache(true);
             return cachedPage;
         }
-        List<SuggestItem> list = getCachedList(listKey);
+        List<SuggestItem> list = getCachedList(pageKey);
         log.info("使用缓存：{}",list);
         if (list == null) {
-            list = fetchFromAmap(normalizedKeyword, normalizedCity, normalizedTypes);
+            list = fetchFromAmap(normalizedKeyword, normalizedCity, normalizedTypes, page, size);
             boolean isHot = markHot(normalizedKeyword);
             int ttlBase = isHot ? 1800 : 300;
             int jitter = ThreadLocalRandom.current().nextInt(30, 120);
             int ttl = ttlBase + jitter;
             if (list.isEmpty()) {
-                redisTemplate.opsForValue().set(listKey, list, Duration.ofSeconds(60));
+                redisTemplate.opsForValue().set(pageKey, list, Duration.ofSeconds(60));
             } else {
-                redisTemplate.opsForValue().set(listKey, list, Duration.ofSeconds(ttl));
+                redisTemplate.opsForValue().set(pageKey, list, Duration.ofSeconds(ttl));
             }
         }
-        PagedResult<SuggestItem> pageResult = slice(list, page, size);
-        boolean isHot = isHot(normalizedKeyword);
-        int ttlBase = isHot ? 900 : 180;
-        int jitter = ThreadLocalRandom.current().nextInt(30, 120);
-        int ttl = ttlBase + jitter;
-        redisTemplate.opsForValue().set(pageKey, pageResult, Duration.ofSeconds(ttl));
+//        PagedResult<SuggestItem> pageResult = slice(list, page, size);
+//        boolean isHot = isHot(normalizedKeyword);
+//        int ttlBase = isHot ? 900 : 180;
+//        int jitter = ThreadLocalRandom.current().nextInt(30, 120);
+//        int ttl = ttlBase + jitter;
+//        redisTemplate.opsForValue().set(pageKey, pageResult, Duration.ofSeconds(ttl));
+        PagedResult<SuggestItem>pageResult=new PagedResult<>();
+        pageResult.setPage(page);
+        pageResult.setSize(size);
+        pageResult.setTotal(list.size());
+        pageResult.setItems(list);
         pageResult.setFromCache(false);
         return pageResult;
     }
 
-    private List<SuggestItem> fetchFromAmap(String keyword, String city, String types) {
+    private List<SuggestItem> fetchFromAmap(String keyword, String city, String types,int page, int size) {
         if (!StringUtils.hasText(keyword)) {
             return Collections.emptyList();
         }
@@ -87,8 +93,8 @@ public class SearchService {
             uriBuilder.setParameter("keywords", keyword)
                      .setParameter("city", city == null ? "" : city)
                      .setParameter("children", "1")
-                     .setParameter("offset", "20")
-                     .setParameter("page", "1")
+                     .setParameter("offset", String.valueOf(size))
+                     .setParameter("page", String.valueOf(page))
                      .setParameter("extensions", "all")
                      .setParameter("citylimit", "true")
                      .setParameter("output", "JSON")
