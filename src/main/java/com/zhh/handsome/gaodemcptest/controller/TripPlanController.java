@@ -9,12 +9,12 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
-@RequestMapping("/trip")
+@RequestMapping("/api/trip")
 public class TripPlanController {
     @Autowired
     private TripPlanService tripPlanService;
 
-    @GetMapping("/stream-plan")
+    @GetMapping(value = "/stream-plan",produces = "text/event-stream")
     public SseEmitter streamPlan(
             @RequestParam("city") String city,
             @RequestParam(value = "days", defaultValue = "3") int days,

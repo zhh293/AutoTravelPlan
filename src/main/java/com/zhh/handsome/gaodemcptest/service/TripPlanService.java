@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletResponse;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.utils.URIBuilder;
@@ -19,9 +20,12 @@ import org.springframework.ai.chat.prompt.Prompt;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.json.JsonParseException;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.core.task.TaskExecutor;
 import reactor.core.publisher.Flux;
@@ -66,8 +70,17 @@ public class TripPlanService {
     }
 
     public SseEmitter streamPlan(String city, int days, String preference) {
+        log.info("开始生成行程：{}，{}，{}", city, days, preference);
         // 1. 初始化SSE，设置超时时间
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
+        // 设置响应头，指定UTF-8编码（关键）
+        HttpServletResponse response = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();
+        if (response != null) {
+            response.setContentType("text/event-stream; charset=utf-8");
+        }
+        if (response != null) {
+            response.setCharacterEncoding("UTF-8");
+        }
         // 2. 注册SSE回调，避免资源泄漏
         registerSseCallbacks(emitter);
 
@@ -90,12 +103,14 @@ public class TripPlanService {
 
                 // 天气
                 List<Map<String, Object>> weather = getWeatherForecast(city, Math.min(2, days));
+                log.info("获取天气数据：{}", weather);
                 if (!weather.isEmpty()) {
                     Map<String, Object> weatherPayload = new HashMap<>();
                     weatherPayload.put("city", city);
                     weatherPayload.put("days", weather);
                     sendWeather(emitter, weatherPayload);
                 }
+
 
                 // 初始化每日景点/颜色配置
                 String[] colors = new String[] { "#FF5733", "#33A1FF", "#33FF57", "#FF33A1", "#FFA533" };
@@ -110,6 +125,7 @@ public class TripPlanService {
 
                 // 构建AI Prompt
                 String prompt = buildPrompt(city, days, preference, spots, dayColor);
+                log.info("构建Prompt：{}", prompt);
                 AtomicBoolean done = new AtomicBoolean(false);
                 StringBuilder buf = new StringBuilder();
                 AtomicInteger consumedLen = new AtomicInteger(0); // 原子整数，避免多线程问题
@@ -252,7 +268,9 @@ public class TripPlanService {
                         String location = poi.path("location").asText("");
                         String address = poi.path("address").asText("");
                         String rating = poi.path("rating").asText("");
-
+                        //拿到photos的json数组
+                        JsonNode photos = poi.path("photos");
+                        String photoUrl = !photos.isEmpty() ? photos.get(0).path("url").asText("") : "";
                         // 过滤无效经纬度
                         if (!StringUtils.hasText(location) || !location.contains(",")) {
                             log.warn("景点[{}]经纬度无效：{}", name, location);
@@ -273,6 +291,7 @@ public class TripPlanService {
                         spot.put("lat", lat);
                         spot.put("address", StringUtils.hasText(address) ? address : "暂无地址");
                         spot.put("rating", StringUtils.hasText(rating) ? rating : "暂无评分");
+                        spot.put("url", photoUrl);
                         spotList.add(spot);
                     }
                 }
@@ -511,10 +530,10 @@ public class TripPlanService {
 
                 【重要规则】
                 1. 必须为所有%d天都规划景点，不能遗漏任何一天
-                2. 仅从以下景点中选择（保留name/lng/lat/address字段）：%s
+                2. 仅从以下景点中选择（保留name/lng/lat/address/url字段）：%s
                 3. 每天景点按"不回头"的地理顺序排列，每天推荐3-4个景点
                 4. 每生成1个景点，仅返回1段独立的JSON，格式必须为：
-                   {"day": 数字, "spot": {"name": "景点名", "lng": 经度, "lat": 纬度, "address": "地址"}, "color": "颜色码"}
+                   {"day": 数字, "spot": {"name": "景点名", "lng": 经度, "lat": 纬度, "address": "地址","url":"https://example.com"}, "color": "颜色码"}
                 5. 每天生成完所有景点后，返回1段标记完成的JSON：
                    {"day": 数字, "isDayComplete": true, "color": "颜色码"}
                 6. 不同天数使用指定颜色：%s
@@ -528,7 +547,7 @@ public class TripPlanService {
                 - 每个JSON对象必须独立完整，不能有嵌套或截断
                 - 所有字段都必须存在且类型正确
                 - day字段必须是整数，从1开始连续递增
-                - spot字段必须包含name/lng/lat/address四个子字段
+                - spot字段必须包含name/lng/lat/address/url五个子字段
                 - lng/lat必须是浮点数格式
                 - color必须是十六进制颜色码格式，如"#FF5733"
                 - 每天必须有isDayComplete标记才算完成
@@ -541,11 +560,11 @@ public class TripPlanService {
                 4. 不要缺少字段：每个景点JSON必须包含所有必需字段
                 
                 【正确示例】（严格按照此格式逐行输出）
-                {"day": 1, "spot": {"name": "故宫博物院", "lng": 116.397026, "lat": 39.918058, "address": "北京市东城区景山前街4号"}, "color": "#FF5733"}
-                {"day": 1, "spot": {"name": "景山公园", "lng": 116.396472, "lat": 39.924091, "address": "北京市东城区景山前街44号"}, "color": "#FF5733"}
+                {"day": 1, "spot": {"name": "故宫博物院", "lng": 116.397026, "lat": 39.918058, "address": "北京市东城区景山前街4号","url":"https://example.com"}, "color": "#FF5733"}
+                {"day": 1, "spot": {"name": "景山公园", "lng": 116.396472, "lat": 39.924091, "address": "北京市东城区景山前街44号","url":"https://example.com"}, "color": "#FF5733"}
                 {"day": 1, "isDayComplete": true, "color": "#FF5733"}
-                {"day": 2, "spot": {"name": "颐和园", "lng": 116.273503, "lat": 39.999612, "address": "北京市海淀区新建宫门路19号"}, "color": "#33A1FF"}
-                {"day": 2, "spot": {"name": "圆明园遗址公园", "lng": 116.306348, "lat": 40.001602, "address": "北京市海淀区清华西路28号"}, "color": "#33A1FF"}
+                {"day": 2, "spot": {"name": "颐和园", "lng": 116.273503, "lat": 39.999612, "address": "北京市海淀区新建宫门路19号","url":"https://example.com"}, "color": "#33A1FF"}
+                {"day": 2, "spot": {"name": "圆明园遗址公园", "lng": 116.306348, "lat": 40.001602, "address": "北京市海淀区清华西路28号","url":"https://example.com"}, "color": "#33A1FF"}
                 {"day": 2, "isDayComplete": true, "color": "#33A1FF"}
                 """,
                 city,
@@ -720,6 +739,7 @@ public class TripPlanService {
             payload.put("day", day);
             payload.put("color", color);
             payload.put("spot", verifiedSpot);
+            log.info("推送景点数据：{}", payload);
             sendData(emitter, payload);
 
             // 当日景点数达标时，生成路线
@@ -730,6 +750,7 @@ public class TripPlanService {
                 routePayload.put("color", dayColor.get(day));
                 routePayload.put("route", route);
                 routePayload.put("isDayRoute", true);
+                log.info("推送路线数据：{}", routePayload);
                 sendData(emitter, routePayload);
             }
         } catch (Exception e) {
@@ -764,7 +785,8 @@ public class TripPlanService {
      */
     private void sendData(SseEmitter emitter, Object data) {
         try {
-            emitter.send(SseEmitter.event().data(data).name("trip-data"));
+            String jsonData = mapper.writeValueAsString(data);
+            emitter.send(SseEmitter.event().data(jsonData, MediaType.APPLICATION_JSON).name("trip-data"));
         } catch (Exception e) {
             log.error("推送SSE数据失败", e);
         }
@@ -777,7 +799,8 @@ public class TripPlanService {
         try {
             Map<String, Object> error = new HashMap<>();
             error.put("error", message);
-            emitter.send(SseEmitter.event().data(error).name("trip-error"));
+            String jsonData = mapper.writeValueAsString(error);
+            emitter.send(SseEmitter.event().data(jsonData,MediaType.APPLICATION_JSON).name("trip-error"));
         } catch (Exception e) {
             log.error("推送SSE错误信息失败", e);
         }
@@ -788,7 +811,7 @@ public class TripPlanService {
      */
     private void sendDone(SseEmitter emitter) {
         try {
-            emitter.send(SseEmitter.event().data("[DONE]").name("trip-done"));
+            emitter.send(SseEmitter.event().data("[DONE]",MediaType.APPLICATION_JSON).name("trip-done"));
         } catch (Exception e) {
             log.error("推送SSE完成标记失败", e);
         }
@@ -796,7 +819,8 @@ public class TripPlanService {
 
     private void sendWeather(SseEmitter emitter, Object data) {
         try {
-            emitter.send(SseEmitter.event().data(data).name("trip-weather"));
+            String jsonData = mapper.writeValueAsString(data);
+            emitter.send(SseEmitter.event().data(jsonData,MediaType.APPLICATION_JSON).name("trip-weather"));
         } catch (Exception e) {
             log.error("推送SSE天气信息失败", e);
         }
