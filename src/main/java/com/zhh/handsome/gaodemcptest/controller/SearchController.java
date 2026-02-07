@@ -3,7 +3,7 @@ package com.zhh.handsome.gaodemcptest.controller;
 
 import com.zhh.handsome.gaodemcptest.model.PagedResult;
 import com.zhh.handsome.gaodemcptest.model.SuggestItem;
-import com.zhh.handsome.gaodemcptest.service.SearchService;
+import com.zhh.handsome.gaodemcptest.service.SearchServiceImpl;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -14,7 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 @RequestMapping("/api/search")
 public class SearchController {
     @Autowired
-    private SearchService searchService;
+    private SearchServiceImpl searchService;
 
     @GetMapping("/suggest")
     public PagedResult<SuggestItem> suggest(

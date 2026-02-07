@@ -1,0 +1,15 @@
+dubbo:
+  application:
+    name: DubboGaoDeMCPTest
+  protocol:
+    name: grpc
+    port: -1  # 自动寻找可用端口
+  registry:
+    address: nacos://localhost:8848
+    parameters:
+      namespace: dev
+      group: Total_GROUP
+  scan:
+    base-packages: com.zhh.handsome.gaodemcptest  # 扫描整个项目包下的dubbo注解
+  provider:
+    timeout: 30000

@@ -2,6 +2,7 @@ package com.zhh.handsome.gaodemcptest;
 //
 //import io.modelcontextprotocol.client.McpAsyncClient;
 //import io.modelcontextprotocol.spec.McpSchema;
+import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -19,6 +20,7 @@ import java.util.Map;
 
 @SpringBootApplication
 @RestController
+@EnableDubbo
 public class GaoDeMcpTestApplication {
     /*@Autowired
     List<McpAsyncClient> mcpAsyncClients;

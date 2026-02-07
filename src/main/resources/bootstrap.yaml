@@ -1,0 +1,24 @@
+spring:
+  ai:
+    openai:
+      api-key: sk-e5zWuv9LGJfOAiwJMqREqqRli8AJ8hc8eU69AW3MxY5sC2cN
+      base-url: https://api.xty.app
+  application:
+    name: GaoDeMCPTest
+  profiles:
+    active: dev
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+        namespace: dev # 后续替换成命名空间ID，先保持这样，语法是对的
+        group: TRIP_GROUP
+      config:
+        server-addr: localhost:8848
+        namespace: dev # 后续替换成命名空间ID
+        group: TRIP_GROUP
+        file-extension: yml
+        refresh-enabled: true
+  # 核心：语法完全正确的nacos配置导入，冒号后有空格
+server:
+  port: 8082
