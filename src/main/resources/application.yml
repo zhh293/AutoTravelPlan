@@ -1,15 +1,49 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: GaoDeMCPTest
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+      database: 0
+  ai:
+    openai:
+      api-key: sk-e5zWuv9LGJfOAiwJMqREqqRli8AJ8hc8eU69AW3MxY5sC2cN
+      base-url: https://api.xty.app
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+amap:
+  rest:
+    key: 467ab90b800b99df269b771674590664
+
+baidu:
+  ai:
+    app-id: 122045146
+    api-key: 2M3uJOYG4MYVwvw6pU9EQTHI
+    secret-key: 8qxgrmbMC4Gpn1OMGPqaQKKQ2sHKWmHn
+
+picarta:
+  api:
+    token: NELSF44ME5JBBVWCKQZW
+
 dubbo:
   application:
-    name: DubboGaoDeMCPTest
+    name: ${spring.application.name}
   protocol:
-    name: grpc
-    port: -1  # 自动寻找可用端口
+    name: tri
+    port: -1
   registry:
-    address: nacos://localhost:8848
-    parameters:
-      namespace: dev
-      group: Total_GROUP
+    address: nacos://${spring.cloud.nacos.discovery.server-addr}
   scan:
-    base-packages: com.zhh.handsome.gaodemcptest  # 扫描整个项目包下的dubbo注解
-  provider:
-    timeout: 30000
+    base-packages: com.zhh.handsome.gaodemcptest.service.remote
