@@ -9,10 +9,16 @@ public class LocationCouncilPrompt {
                         double lng,
                         String poiListText,
                         String sceneTagsText,
-                        String rawImageDescription) {
+                        String rawImageDescription,
+                        String landmarkName) {
                 String poiBlock = poiListText == null || poiListText.trim().isEmpty()
                                 ? "暂无可用 POI 信息（如果你无法做出可靠判断，请在输出中显式说明，且不要虚构景点）。"
                                 : poiListText.trim();
+
+                String landmarkBlock = landmarkName == null || landmarkName.trim().isEmpty()
+                                ? "当前未能识别出照片主体的明确地标名称，你需要结合经纬度和周边 POI 自行推断用户最可能拍照的主景点，并在输出的 photoSpotName 和 photoSpotCaption 中集中描写这个地点。"
+                                : "照片主体地标名称（优先认为这是用户当前拍照所在的主景点）：\"" + landmarkName.trim()
+                                                + "\"。在输出的 photoSpotName 和 photoSpotCaption 中，应优先围绕这一地点展开。";
 
                 String now = OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
 
@@ -26,17 +32,20 @@ public class LocationCouncilPrompt {
                                 .append("   - longitude = ").append(lng).append("\n\n")
                                 .append("2. 该经纬度附近通过地图服务获取的「周边景点/设施 POI 列表」（已按距离做过初步过滤和排序，越靠前通常越近）：\n")
                                 .append(poiBlock).append("\n\n")
+                                .append("3. 照片主体地标信息（如果有）：\n")
+                                .append("   - ").append(landmarkBlock).append("\n\n")
                                 .append("【二、本轮多 AI 协同任务说明】\n")
                                 .append("1. 你当前扮演的是多模型委员会中的一员，需要在给定 POI 列表中，挑选出【最适合旅游和拍照打卡】的 5 个景点。\n")
-                                .append("2. 后续系统会收集多个模型的候选结果，进行匿名化投票和加权汇总，最终由主席模型生成对用户可见的推荐结果。\n")
-                                .append("3. 因此，你必须输出结构清晰、字段稳定、便于机器解析的 JSON，而不是普通散文。\n\n")
+                                .append("2. 若提供了照片主体地标名称，你需要优先认为这是用户当前拍照的主景点，在推荐结果中至少有 1 个 items 元素需要与其强相关，并在 photoSpotName 与 photoSpotCaption 中集中呈现。\n")
+                                .append("3. 后续系统会收集多个模型的候选结果，进行匿名化投票和加权汇总，最终由主席模型生成对用户可见的推荐结果。\n")
+                                .append("4. 因此，你必须输出结构清晰、字段稳定、便于机器解析的 JSON，而不是普通散文。\n\n")
                                 .append("【三、选择景点时的判断原则】\n")
                                 .append("1. 优先考虑适合【旅游】【观光】【拍照打卡】的 POI，例如景区、观景台、特色街区、公园、广场、地标建筑等。\n")
                                 .append("2. 若 POI 中包含明显的非旅游类点位（如银行、公司、医院、普通小区等），一般不应作为主要推荐目标，除非存在特别合理的场景解释。\n")
                                 .append("3. 在 5 个景点中，尽量保证体验的多样性（例如：视野开阔的观景点 + 具有特色氛围的街区 + 适合夜景/日落的机位等），而不是 5 个高度雷同的地点。\n")
                                 .append("4. 如果 POI 信息明显不足以支撑可靠判断，你应当降低置信度，并在推荐理由中明确说明不确定性来源。\n\n")
                                 .append("【四、关于“文艺青年”风格的文案要求（极其重要）】\n")
-                                .append("在下面的 JSON 结构中，特别是每个景点的 \"caption\" 字段，你需要写出一种典型“文艺青年”的旅行笔记风格，要求如下：\n")
+                                .append("在下面的 JSON 结构中，特别是 photoSpotCaption 字段以及每个景点的 \"caption\" 字段，你需要写出一种典型“文艺青年”的旅行笔记风格，要求如下：\n")
                                 .append("1. 文字应当有画面感：多描写光影、天气、街道气味、人群氛围、脚步声、远处的灯光或山脊线等细节，而不是机械罗列信息。\n")
                                 .append("2. 文案要有情绪：可以带一点轻微的感伤、期待、松弛感或生活感悟，让人读完会想“我也想站在这里看看”。\n")
                                 .append("3. 适度比喻和拟人：可以把风、河、水面、建筑当作有情绪的角色，但不要过度浮夸，要在克制中带一点小浪漫。\n")
@@ -48,6 +57,8 @@ public class LocationCouncilPrompt {
                                 .append("{\n")
                                 .append("  \"latitude\": <double, 与输入纬度相同>,\n")
                                 .append("  \"longitude\": <double, 与输入经度相同>,\n")
+                                .append("  \"photoSpotName\": \"用户当前拍照所在的主景点名称。如果提供了照片主体地标名称，应尽量与之保持一致；否则请从 POI 列表中选择你认为最能代表拍照地点的景点名称。\",\n")
+                                .append("  \"photoSpotCaption\": \"围绕用户当前拍照主景点撰写的一段文艺青年风格中文短文案，必须有画面感和情绪，长度一般不少于 80 个汉字，可参考社交媒体旅行随笔的表达方式。\",\n")
                                 .append("  \"items\": [\n")
                                 .append("    {\n")
                                 .append("      \"poiName\": \"景点名称，必须来自给定 POI 列表\",\n")
@@ -56,7 +67,7 @@ public class LocationCouncilPrompt {
                                 .append("      \"bestVisitTime\": \"推荐前往的时间段/季节，例如：秋季日落前 1 小时、工作日白天等\",\n")
                                 .append("      \"recommendation\": \"简要推荐理由，说明为什么适合旅游和拍照打卡\",\n")
                                 .append("      \"caption\": \"一段适合发在社交平台的中文短文案，语气自然、有画面感\",\n")
-                                                                .append("      \"url\": \"景点图片URL地址，用于展示景点照片\"\n")
+                                .append("      \"url\": \"景点图片URL地址，用于展示景点照片\"\n")
                                 .append("    ")
                                 .append("    }\n")
                                 .append("  ]\n")
@@ -71,7 +82,7 @@ public class LocationCouncilPrompt {
                                 .append("2. 不要输出任何涉及违法、违规、危险攀爬、翻越护栏等内容的建议。\n")
                                 .append("3. 文案风格可以有一点社交媒体色彩，但不要过度夸张，保持真实可靠。\n\n")
                                 .append("【最终任务】\n")
-                                .append("基于以上经纬度与周边 POI 列表，请直接输出上述格式的 JSON，对该区域最适合旅游和拍照打卡的 5 个景点给出结构化推荐结果。")
+                                .append("基于以上经纬度与周边 POI 列表，请直接输出上述格式的 JSON，对该区域最适合旅游和拍照打卡的 5 个景点给出结构化推荐结果，并特别确保 photoSpotName 和 photoSpotCaption 能够真实反映用户当前拍照所在的主景点体验。")
                                 .append("\n")
                                 .append("当前任务时间戳: ").append(now);
 

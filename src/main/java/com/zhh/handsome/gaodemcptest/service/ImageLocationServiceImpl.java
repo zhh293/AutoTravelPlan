@@ -124,7 +124,7 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                     Double geoLng = (Double) geo.get("lng");
                     Double geoLat = (Double) geo.get("lat");
                     LocationResult location = buildResult("BAIDU", geoLng, geoLat, 0.9, landmark, geo);
-                    TravelPoiRecommendation travelPlan = buildTravelPlan(geoLng, geoLat);
+                    TravelPoiRecommendation travelPlan = buildTravelPlan(geoLng, geoLat, landmark);
                     if (travelPlan != null) {
                         location.setTravelPlan(travelPlan);
                     }
@@ -146,7 +146,7 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                 Map<String, Object> regeo = amapUtils.regeo(lng, lat);
                 if ((Boolean) regeo.get("success")) {
                     LocationResult location = buildResult("PICARTA", lng, lat, confidence, null, regeo);
-                    TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat);
+                    TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat, null);
                     if (travelPlan != null) {
                         location.setTravelPlan(travelPlan);
                     }
@@ -160,7 +160,7 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                             .confidence(confidence)
                             .formattedAddress("未知地址 (坐标: " + lat + ", " + lng + ")")
                             .build();
-                    TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat);
+                    TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat, null);
                     if (travelPlan != null) {
                         location.setTravelPlan(travelPlan);
                     }
@@ -307,11 +307,11 @@ public class ImageLocationServiceImpl implements ImageLocationService {
         return sb.toString();
     }
 
-    private TravelPoiRecommendation buildTravelPlan(Double lng, Double lat) {
+    private TravelPoiRecommendation buildTravelPlan(Double lng, Double lat, String landmarkName) {
         try {
             java.util.List<java.util.Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(lng, lat);
             String poiListText = buildPoiListText(spots);
-            String councilPrompt = LocationCouncilPrompt.build(lat, lng, poiListText, null, null);
+            String councilPrompt = LocationCouncilPrompt.build(lat, lng, poiListText, null, null, landmarkName);
             String councilResult = locationLlmCouncil.runFullCouncil(councilPrompt);
             log.info("多 AI 讨论结果: {}", councilResult);
             if (councilResult == null) {

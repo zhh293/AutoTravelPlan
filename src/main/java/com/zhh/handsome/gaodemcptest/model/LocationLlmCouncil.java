@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
 @Slf4j
 public class LocationLlmCouncil {
 
-    @Value("${llm.council.api-key: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}")
+    @Value("${llm.council.api-key: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}")
     private String apiKey;
 
     @Value("${llm.council.api-url:https://openrouter.ai/api/v1/chat/completions}")

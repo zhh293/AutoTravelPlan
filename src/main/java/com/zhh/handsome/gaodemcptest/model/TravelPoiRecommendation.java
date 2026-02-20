@@ -9,6 +9,8 @@ public class TravelPoiRecommendation {
 
     private double latitude;
     private double longitude;
+    private String photoSpotName;
+    private String photoSpotCaption;
     private List<Item> items;
 
     @Data
@@ -22,4 +24,3 @@ public class TravelPoiRecommendation {
         private String url;
     }
 }
-
