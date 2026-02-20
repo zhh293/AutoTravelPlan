@@ -14,10 +14,10 @@ spring:
     openai:
       api-key: sk-e5zWuv9LGJfOAiwJMqREqqRli8AJ8hc8eU69AW3MxY5sC2cN
       base-url: https://api.xty.app
-  cloud:
-    nacos:
-      discovery:
-        server-addr: 127.0.0.1:8848
+#  cloud:
+#    nacos:
+#      discovery:
+#        server-addr: 127.0.0.1:8848
   servlet:
     multipart:
       max-file-size: 10MB
@@ -37,13 +37,13 @@ picarta:
   api:
     token: NELSF44ME5JBBVWCKQZW
 
-dubbo:
-  application:
-    name: ${spring.application.name}
-  protocol:
-    name: tri
-    port: -1
-  registry:
-    address: nacos://${spring.cloud.nacos.discovery.server-addr}
-  scan:
-    base-packages: com.zhh.handsome.gaodemcptest.service.remote
+#dubbo:
+#  application:
+#    name: ${spring.application.name}
+#  protocol:
+#    name: tri
+#    port: -1
+#  registry:
+#    address: nacos://${spring.cloud.nacos.discovery.server-addr}
+#  scan:
+#    base-packages: com.zhh.handsome.gaodemcptest.service.remote

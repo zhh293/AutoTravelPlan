@@ -3,19 +3,22 @@
   "info": {
     "title": "GaoDeMCPTest API",
     "version": "1.0.0",
-    "description": "基于当前项目源码自动提取生成的接口文档（仅包含项目中实际存在的接口）。"
+    "description": "基于当前项目源码生成的接口文档，支持 Apifox 导入。"
   },
   "servers": [
     {
       "url": "http://localhost:8082",
-      "description": "本地开发环境（根据 application.properties 中 server.port=8082）"
+      "description": "本地开发环境"
     }
   ],
   "paths": {
-    "/search/suggest": {
+    "/api/search/suggest": {
       "get": {
+        "tags": [
+          "Search"
+        ],
         "summary": "地点搜索联想",
-        "description": "根据关键词（可选城市、类型）查询地点联想结果，并返回分页数据。对应 SearchController.suggest。",
+        "description": "根据关键词查询地点联想结果，支持城市和类型筛选。",
         "operationId": "searchSuggest",
         "parameters": [
           {
@@ -25,7 +28,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "搜索关键词（必填）。对应 @RequestParam(\"keyword\")."
+            "description": "搜索关键词"
           },
           {
             "name": "city",
@@ -34,7 +37,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "城市（可选）。对应 @RequestParam(value = \"city\", required = false)."
+            "description": "城市名称"
           },
           {
             "name": "types",
@@ -43,37 +46,33 @@
             "schema": {
               "type": "string"
             },
-            "description": "高德 POI 类型编码（可选，用于按类型筛选）。对应 @RequestParam(value = \"types\", required = false)."
+            "description": "POI类型编码"
           },
           {
             "name": "page",
             "in": "query",
-            "required": false,
             "schema": {
               "type": "integer",
-              "format": "int32",
               "default": 1,
               "minimum": 1
             },
-            "description": "页码（从 1 开始）。默认 1；若 <1 强制重置为 1。"
+            "description": "页码 (最小为1)"
           },
           {
             "name": "size",
             "in": "query",
-            "required": false,
             "schema": {
               "type": "integer",
-              "format": "int32",
               "default": 10,
               "minimum": 1,
               "maximum": 50
             },
-            "description": "每页条数。默认 10；<1 强制重置为 10；>50 强制重置为 50。"
+            "description": "每页条数 (1-50)"
           }
         ],
         "responses": {
           "200": {
-            "description": "分页的地点联想结果。",
+            "description": "成功返回分页结果",
             "content": {
               "application/json": {
                 "schema": {
@@ -85,33 +84,25 @@
         }
       }
     },
-    "/trip/stream-plan": {
+    "/api/trip/stream-plan": {
       "get": {
-        "summary": "行程规划（SSE 流式返回）",
-        "description": "根据城市、天数和偏好，调用高德 POI/路线与 Spring AI 生成行程规划，通过 SSE 流式推送天气、景点与路线等事件。对应 TripPlanController.streamPlan。",
-        "operationId": "tripStreamPlan",
+        "tags": [
+          "Trip"
+        ],
+        "summary": "行程规划 (SSE)",
+        "description": "生成行程规划，通过 SSE 流式返回。",
+        "operationId": "streamPlan",
         "parameters": [
-          {
-            "name": "city",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "目标城市名称（必填）。对应 @RequestParam(\"city\"). 为空会返回错误事件。"
-          },
           {
             "name": "days",
             "in": "query",
-            "required": false,
             "schema": {
               "type": "integer",
-              "format": "int32",
               "default": 3,
               "minimum": 1,
               "maximum": 10
             },
-            "description": "游玩天数。默认 3；<1 时在代码中重置为 1；>10 时重置为 10。"
+            "description": "游玩天数 (1-10)"
           },
           {
             "name": "preference",
@@ -120,17 +111,86 @@
             "schema": {
               "type": "string"
             },
-            "description": "行程偏好（如美食、亲子等，可选）。对应 @RequestParam(value = \"preference\", required = false)."
+            "description": "偏好需求"
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TripPlanItem"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "SSE 流式返回，Content-Type 为 text/event-stream。\n\n事件包括：\n- event: trip-weather，data 为 TripWeatherEvent\n- event: trip-data，data 为 TripDataEvent 或 TripRouteEvent\n- event: trip-error，data 为 TripErrorEvent\n- event: trip-done，data 为字符串 \"[DONE]\"\n具体结构见 components.schemas。",
+            "description": "SSE 流式响应",
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "type": "string",
-                  "description": "标准 Server-Sent Events 文本流，每一行 data 字段为 JSON 或字符串，结构见接口描述与 components.schemas。"
+                  "type": "string"
+                },
+                "examples": {
+                  "weather": {
+                    "summary": "天气事件",
+                    "value": "event: trip-weather\ndata: {\"city\":\"北京\",\"days\":[{\"date\":\"2023-10-01\",\"week\":\"1\",\"weather\":\"晴\",\"temp\":\"20\"}]}"
+                  },
+                  "data": {
+                    "summary": "行程数据事件",
+                    "value": "event: trip-data\ndata: {\"day\":1,\"title\":\"故宫博物院\",\"lat\":39.916344,\"lng\":116.397155,\"description\":\"...\",\"color\":\"#FF5733\",\"cost\":150}"
+                  },
+                  "route": {
+                    "summary": "路线规划事件",
+                    "value": "event: trip-data\ndata: {\"day\":1,\"routePath\":[[116.397,39.916],[116.404,39.908]],\"routeColor\":\"#FF5733\"}"
+                  },
+                  "done": {
+                    "summary": "结束事件",
+                    "value": "event: trip-done\ndata: [DONE]"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image/identify-location": {
+      "post": {
+        "tags": [
+          "Image"
+        ],
+        "summary": "图片地标识别",
+        "description": "上传图片，识别拍摄地点及地标信息。",
+        "operationId": "identifyLocation",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "图片文件"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "识别成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result_LocationResult"
                 }
               }
             }
@@ -141,265 +201,174 @@
   },
   "components": {
     "schemas": {
-      "SuggestItem": {
+      "TripPlanItem": {
         "type": "object",
-        "description": "地点联想条目。对应 com.zhh.handsome.gaodemcptest.model.SuggestItem。",
         "properties": {
-          "id": {
+          "city": {
             "type": "string",
-            "description": "地点唯一标识，高德 POI id。"
+            "description": "城市名称"
           },
           "title": {
             "type": "string",
-            "description": "主标题，一般为 POI 名称。"
+            "description": "标题"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double",
+            "description": "纬度"
+          },
+          "lng": {
+            "type": "number",
+            "format": "double",
+            "description": "经度"
+          }
+        }
+      },
+      "SuggestItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "POI唯一标识"
+          },
+          "title": {
+            "type": "string",
+            "description": "POI名称"
           },
           "titleBold": {
             "type": "boolean",
-            "description": "前端展示用标记：标题是否加粗。"
+            "description": "标题是否加粗"
           },
           "subtitle": {
             "type": "string",
-            "description": "副标题，通常为省市区+详细地址的拼接。"
+            "description": "副标题"
           },
           "subtitleSmall": {
             "type": "boolean",
-            "description": "前端展示用标记：副标题是否使用小字号。"
-          },
-          "city": {
-            "type": "string",
-            "description": "城市名称，对应高德返回的 cityname。"
-          },
-          "district": {
-            "type": "string",
-            "description": "区县名称，对应高德返回的 adname。"
-          },
-          "province": {
-            "type": "string",
-            "description": "省份名称，对应高德返回的 pname。"
-          },
-          "adcode": {
-            "type": "string",
-            "description": "行政区划代码，对应高德返回的 adcode。"
+            "description": "副标题是否小字体"
           },
           "address": {
             "type": "string",
-            "description": "详细地址，对应高德返回的 address。"
+            "description": "详细地址"
+          },
+          "province": {
+            "type": "string",
+            "description": "省份"
+          },
+          "city": {
+            "type": "string",
+            "description": "城市"
+          },
+          "district": {
+            "type": "string",
+            "description": "区县"
+          },
+          "adcode": {
+            "type": "string",
+            "description": "行政区划代码"
+          },
+          "lng": {
+            "type": "number",
+            "format": "double",
+            "description": "经度"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double",
+            "description": "纬度"
           }
         }
       },
       "PagedResult_SuggestItem": {
         "type": "object",
-        "description": "分页结果包装类型。对应 com.zhh.handsome.gaodemcptest.model.PagedResult<SuggestItem>。",
         "properties": {
           "page": {
             "type": "integer",
-            "format": "int32",
-            "description": "当前页码。"
+            "description": "当前页码"
           },
           "size": {
             "type": "integer",
-            "format": "int32",
-            "description": "每页条数。"
+            "description": "每页大小"
           },
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "总记录数。"
+            "description": "总记录数"
           },
           "fromCache": {
             "type": "boolean",
-            "description": "是否来自缓存。SearchService 中在返回前会设置该字段。"
+            "description": "是否来自缓存"
           },
           "items": {
             "type": "array",
-            "description": "当前页的数据列表。",
             "items": {
               "$ref": "#/components/schemas/SuggestItem"
-            }
+            },
+            "description": "数据列表"
           }
         }
       },
-      "TripWeatherItem": {
+      "LocationResult": {
         "type": "object",
-        "description": "单日天气信息。对应 TripPlanService.getWeatherForecast 中构造的 item。",
         "properties": {
-          "date": {
+          "source": {
             "type": "string",
-            "description": "日期（yyyy-MM-dd），来自高德天气 API 的 date 字段。"
+            "description": "识别来源 (EXIF, BAIDU, PICARTA)"
           },
-          "weekday": {
+          "formattedAddress": {
             "type": "string",
-            "description": "星期几，如“周一”、“周二”等。由 toWeekday(week) 转换得到。"
+            "description": "详细地址"
           },
-          "weather": {
+          "country": {
             "type": "string",
-            "description": "天气情况（白天天气/夜间天气合并），如“晴 / 多云”。"
+            "description": "国家"
           },
-          "temperature": {
+          "province": {
             "type": "string",
-            "description": "温度区间，如“25℃ / 18℃”。"
-          }
-        }
-      },
-      "TripWeatherEvent": {
-        "type": "object",
-        "description": "SSE 事件 trip-weather 的 data 内容。由 TripPlanService.sendWeather 推送。",
-        "properties": {
+            "description": "省份"
+          },
           "city": {
             "type": "string",
-            "description": "城市名称，与请求参数 city 一致。"
+            "description": "城市"
           },
-          "days": {
-            "type": "array",
-            "description": "多天的天气预报列表，长度不超过游玩天数且最大为 2。",
-            "items": {
-              "$ref": "#/components/schemas/TripWeatherItem"
-            }
-          }
-        },
-        "example": {
-          "city": "杭州",
-          "days": [
-            {
-              "date": "2025-05-01",
-              "weekday": "周四",
-              "weather": "多云 / 小雨",
-              "temperature": "26℃ / 18℃"
-            }
-          ]
-        }
-      },
-      "TripSpot": {
-        "type": "object",
-        "description": "单个景点信息。由 AI 生成并经 verifyOrCompleteSpot 校验/补全。",
-        "properties": {
-          "name": {
+          "district": {
             "type": "string",
-            "description": "景点名称。"
+            "description": "区县"
           },
-          "lng": {
+          "longitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "confidence": {
             "type": "number",
             "format": "double",
-            "description": "经度。"
+            "description": "置信度"
           },
-          "lat": {
-            "type": "number",
-            "format": "double",
-            "description": "纬度。"
-          },
-          "address": {
+          "landmarkName": {
             "type": "string",
-            "description": "景点地址。若高德返回为空则可能为“暂无地址”。"
-          },
-          "rating": {
-            "type": "string",
-            "description": "景点评分字符串。若高德无评分则可能为“暂无评分”。"
+            "description": "地标名称"
           }
         }
       },
-      "TripDataEvent": {
+      "Result_LocationResult": {
         "type": "object",
-        "description": "SSE 事件 trip-data 中，表示单个景点数据时的 data 内容。",
         "properties": {
-          "day": {
+          "code": {
             "type": "integer",
-            "format": "int32",
-            "description": "第几天的行程，从 1 开始。"
+            "example": 200
           },
-          "color": {
+          "message": {
             "type": "string",
-            "description": "该天对应的颜色值（十六进制颜色码，如“#FF5733”）。"
+            "example": "success"
           },
-          "spot": {
-            "$ref": "#/components/schemas/TripSpot"
-          }
-        },
-        "example": {
-          "day": 1,
-          "color": "#FF5733",
-          "spot": {
-            "name": "西湖风景名胜区",
-            "lng": 120.15507,
-            "lat": 30.27409,
-            "address": "浙江省杭州市西湖区龙井路1号",
-            "rating": "4.7"
+          "data": {
+            "$ref": "#/components/schemas/LocationResult"
           }
         }
-      },
-      "TripRoutePoint": {
-        "type": "object",
-        "description": "路线上的一个经纬度点。",
-        "properties": {
-          "lng": {
-            "type": "number",
-            "format": "double",
-            "description": "经度。"
-          },
-          "lat": {
-            "type": "number",
-            "format": "double",
-            "description": "纬度。"
-          }
-        }
-      },
-      "TripRouteEvent": {
-        "type": "object",
-        "description": "SSE 事件 trip-data 中，表示当日路线时的 data 内容（包含 isDayRoute=true）。",
-        "properties": {
-          "day": {
-            "type": "integer",
-            "format": "int32",
-            "description": "第几天的行程。"
-          },
-          "color": {
-            "type": "string",
-            "description": "该天对应的颜色值。"
-          },
-          "route": {
-            "type": "array",
-            "description": "按照高德驾车路径 polyline 展开的一系列经纬度点。",
-            "items": {
-              "$ref": "#/components/schemas/TripRoutePoint"
-            }
-          },
-          "isDayRoute": {
-            "type": "boolean",
-            "description": "是否标记为当日完整路线。TripPlanService 中固定为 true。"
-          }
-        },
-        "example": {
-          "day": 1,
-          "color": "#FF5733",
-          "route": [
-            {
-              "lng": 120.15507,
-              "lat": 30.27409
-            },
-            {
-              "lng": 120.1555,
-              "lat": 30.23101
-            }
-          ],
-          "isDayRoute": true
-        }
-      },
-      "TripErrorEvent": {
-        "type": "object",
-        "description": "SSE 事件 trip-error 的 data 内容。",
-        "properties": {
-          "error": {
-            "type": "string",
-            "description": "错误信息字符串，如参数错误、行程生成失败等。"
-          }
-        },
-        "example": {
-          "error": "参数错误：城市不能为空，天数需≥1"
-        }
-      },
-      "TripDoneEvent": {
-        "type": "string",
-        "description": "SSE 事件 trip-done 的 data 内容。固定为字符串 \"[DONE]\"。",
-        "example": "[DONE]"
       }
     }
   }

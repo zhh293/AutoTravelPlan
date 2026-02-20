@@ -1,0 +1,104 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "BasicBack API",
+    "version": "1.0.0",
+    "description": "BasicBack 项目接口文档，支持 Apifox 导入。"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "本地开发环境"
+    }
+  ],
+  "paths": {
+    "/api/user/updatepw": {
+      "put": {
+        "tags": [
+          "User"
+        ],
+        "summary": "修改密码",
+        "description": "用户修改登录密码。",
+        "operationId": "updatePassword",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "oldPw": {
+                    "type": "string",
+                    "description": "旧密码"
+                  },
+                  "newPw": {
+                    "type": "string",
+                    "description": "新密码"
+                  }
+                },
+                "required": [
+                  "oldPw",
+                  "newPw"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "修改成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "User"
+        ],
+        "summary": "修改密码 (兼容)",
+        "description": "部分客户端可能使用POST请求。",
+        "operationId": "updatePasswordPost",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "oldPw": {
+                    "type": "string"
+                  },
+                  "newPw": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "oldPw",
+                  "newPw"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "修改成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

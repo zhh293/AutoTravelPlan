@@ -18,4 +18,16 @@ public class ThreadPoolConfig {
         executor.initialize();
         return executor;
     }
+
+    @Bean("llmCouncilExecutor")
+    public TaskExecutor llmCouncilExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("llm-council-");
+        executor.setKeepAliveSeconds(60);
+        executor.initialize();
+        return executor;
+    }
 }

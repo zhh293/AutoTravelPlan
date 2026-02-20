@@ -55,4 +55,9 @@ public class LocationResult {
      * 识别到的地标名称 (如果适用)
      */
     private String landmarkName;
+
+    /**
+     * 出游推荐结果（基于周边景点的多 AI 讨论输出）
+     */
+    private TravelPoiRecommendation travelPlan;
 }

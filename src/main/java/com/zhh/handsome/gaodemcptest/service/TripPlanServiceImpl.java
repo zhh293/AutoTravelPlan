@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zhh.handsome.gaodemcptest.model.AmapPoiUtils;
 import com.zhh.handsome.gaodemcptest.model.TripPlanItem;
 import jakarta.servlet.http.HttpServletResponse;
-import org.apache.dubbo.config.annotation.DubboService;
+//import org.apache.dubbo.config.annotation.DubboService;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.utils.URIBuilder;
@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
-@DubboService
+//@DubboService
 public class TripPlanServiceImpl implements TripPlanService {
     private static final Logger log = LoggerFactory.getLogger(TripPlanServiceImpl.class);
 

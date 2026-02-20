@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zhh.handsome.gaodemcptest.model.PagedResult;
 import com.zhh.handsome.gaodemcptest.model.SuggestItem;
 import groovy.util.logging.Slf4j;
-import org.apache.dubbo.config.annotation.DubboService;
+//import org.apache.dubbo.config.annotation.DubboService;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.utils.URIBuilder;
@@ -16,7 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.cloud.context.config.annotation.RefreshScope;
+//import org.springframework.cloud.context.config.annotation.RefreshScope;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -31,8 +31,8 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @Service
 @Slf4j
-@RefreshScope
-@DubboService
+//@RefreshScope
+//@DubboService
 public class SearchServiceImpl implements SearchService{
     private static final Logger log = LoggerFactory.getLogger(SearchServiceImpl.class);
     @Value("${amap.rest.key}")
