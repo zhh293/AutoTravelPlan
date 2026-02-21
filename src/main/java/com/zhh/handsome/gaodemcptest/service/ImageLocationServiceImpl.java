@@ -98,8 +98,9 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                     log.info("从图片提取到GPS信息: {}, {}", gps.getLatitude(), gps.getLongitude());
                     Map<String, Object> regeo = amapUtils.regeo(gps.getLongitude(), gps.getLatitude());
                     if ((Boolean) regeo.get("success")) {
-                        return Result
-                                .success(buildResult("EXIF", gps.getLongitude(), gps.getLatitude(), 1.0, null, regeo));
+                        LocationResult location = buildResult("EXIF", gps.getLongitude(), gps.getLatitude(), 1.0, null,
+                                regeo);
+                        return Result.success(location);
                     }
                 }
             }
@@ -124,10 +125,6 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                     Double geoLng = (Double) geo.get("lng");
                     Double geoLat = (Double) geo.get("lat");
                     LocationResult location = buildResult("BAIDU", geoLng, geoLat, 0.9, landmark, geo);
-                    TravelPoiRecommendation travelPlan = buildTravelPlan(geoLng, geoLat, landmark);
-                    if (travelPlan != null) {
-                        location.setTravelPlan(travelPlan);
-                    }
                     return Result.success(location);
                 }
             }
@@ -146,10 +143,6 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                 Map<String, Object> regeo = amapUtils.regeo(lng, lat);
                 if ((Boolean) regeo.get("success")) {
                     LocationResult location = buildResult("PICARTA", lng, lat, confidence, null, regeo);
-                    TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat, null);
-                    if (travelPlan != null) {
-                        location.setTravelPlan(travelPlan);
-                    }
                     return Result.success(location);
                 } else {
                     // 如果高德逆地理失败，至少返回坐标
@@ -160,10 +153,6 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                             .confidence(confidence)
                             .formattedAddress("未知地址 (坐标: " + lat + ", " + lng + ")")
                             .build();
-                    TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat, null);
-                    if (travelPlan != null) {
-                        location.setTravelPlan(travelPlan);
-                    }
                     return Result.success(location);
                 }
             }
@@ -199,15 +188,6 @@ public class ImageLocationServiceImpl implements ImageLocationService {
 
         CompletableFuture.runAsync(() -> {
             try {
-                Result<LocationResult> locationResult = identifyLocation(file);
-                emitter.send(SseEmitter.event().name("location").data(locationResult));
-
-                if (locationResult.getData() != null
-                        && locationResult.getData().getTravelPlan() != null) {
-                    emitter.send(SseEmitter.event().name("travel-plan")
-                            .data(locationResult.getData().getTravelPlan()));
-                }
-
                 byte[] originalBytes = file.getBytes();
                 byte[] processedBytes = ensureMaxSize(originalBytes);
                 String base64 = Base64.getEncoder().encodeToString(processedBytes);
@@ -281,6 +261,17 @@ public class ImageLocationServiceImpl implements ImageLocationService {
         }, IMAGE_EXECUTOR);
 
         return emitter;
+    }
+
+    public Result<TravelPoiRecommendation> generateTravelPlan(Double lng, Double lat, String landmarkName) {
+        if (lng == null || lat == null) {
+            return Result.error("经纬度不能为空");
+        }
+        TravelPoiRecommendation travelPlan = buildTravelPlan(lng, lat, landmarkName);
+        if (travelPlan == null) {
+            return Result.error("多 AI 出游推荐生成失败");
+        }
+        return Result.success(travelPlan);
     }
 
     private String buildPoiListText(java.util.List<java.util.Map<String, Object>> spots) {
