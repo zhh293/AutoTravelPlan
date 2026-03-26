@@ -45,4 +45,7 @@ public class ImageLocationController {
         String taskId = travelPlanTaskProducer.submitTask(lng, lat, landmarkName);
         return Result.success(taskId);
     }
+
+
+    
 }

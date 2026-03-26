@@ -18,21 +18,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
+//│  ffacf8acafeacd8e083960ff9e7d83f96f6c556a85d8bfd35136b38c4ebc71e0█
 @Component
 @Slf4j
 public class LocationLlmCouncil {
 
-    @Value("${llm.council.api-key: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}")
+    @Value("${llm.council.api-key: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}")
     private String apiKey;
 
     @Value("${llm.council.api-url:https://openrouter.ai/api/v1/chat/completions}")
     private String apiUrl;
 
-    @Value("${llm.council.models:deepseek/deepseek-r1-0528,deepseek/deepseek-r1-0528,deepseek/deepseek-r1-0528,deepseek/deepseek-r1-0528}")
+    @Value("${llm.council.models:moonshotai/kimi-k2.5,moonshotai/kimi-k2.5,moonshotai/kimi-k2.5,moonshotai/kimi-k2.5}")
     private String councilModelsConfig;
 
-    @Value("${llm.council.chairman-model:deepseek/deepseek-r1-0528}")
+    @Value("${llm.council.chairman-model:moonshotai/kimi-k2.5}")
     private String chairmanModel;
 
     private final WebClient webClient;
@@ -40,7 +40,9 @@ public class LocationLlmCouncil {
     private final Executor llmCouncilExecutor;
 
     public LocationLlmCouncil(@Qualifier("llmCouncilExecutor") Executor llmCouncilExecutor) {
-        this.webClient = WebClient.builder().build();
+        this.webClient = WebClient.builder()
+                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024)) // 设置为10MB
+                .build();
         this.llmCouncilExecutor = llmCouncilExecutor;
     }
 
@@ -101,6 +103,9 @@ public class LocationLlmCouncil {
         for (String model : models) {
             futures.add(queryModel(model, userQuery));
         }
+
+        //这里是主线程等待所有任务完成并且返回结果
+        //这个线程阻塞住了，我觉得可以也弄成回调的形式，不让这个线程阻塞。。。。。。。。。。。。。
         CompletableFuture<Void> all = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
         all.join();
 

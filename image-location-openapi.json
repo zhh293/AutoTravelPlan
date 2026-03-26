@@ -1,0 +1,465 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Image Location & Travel Plan API",
+    "version": "1.0.0",
+    "description": "基于图片的地点识别与多 AI 出游推荐服务。支持同步/异步出游推荐以及 WebSocket 结果推送。"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8082",
+      "description": "本地开发环境示例"
+    }
+  ],
+  "paths": {
+    "/api/image/identify-location": {
+      "post": {
+        "summary": "图片地点识别",
+        "description": "上传图片文件，识别图片拍摄地点及基础位置信息。",
+        "operationId": "identifyLocation",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "图片文件"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "地点识别成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultLocationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "错误响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image/identify-location-with-effects": {
+      "post": {
+        "summary": "图片美化处理（SSE 实时效果返回）",
+        "description": "上传图片后，对图片进行对比度增强、去雾、隐私美化等多阶段处理，以便后续地点识别更加清晰，同时通过 Server-Sent Events (SSE) 流式返回每个阶段的处理结果。",
+        "operationId": "identifyLocationWithEffects",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "图片文件"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE 流连接建立成功。后端会按阶段依次推送事件：\"enhance\"（对比度增强）、\"dehaze\"（去雾处理）、\"privacy\"（隐私/动漫化处理），以及错误时的 \"error\" 事件。",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "SSE 事件流。每条事件的 data 字段为一个 JSON，结构参考 components.schemas.ProcessResult；error 事件的 data 为统一的错误返回 ResultError。",
+                  "example": "event: enhance\\ndata: {\\\"type\\\":\\\"contrast_enhance\\\",\\\"success\\\":true,\\\"message\\\":\\\"ok\\\",\\\"imageBase64\\\":\\\"...\\\"}\\n\\n"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image/travel-plan": {
+      "post": {
+        "summary": "同步出游推荐",
+        "description": "基于经纬度（以及可选的主景点名）同步生成多 AI 出游推荐结果。",
+        "operationId": "travelPlan",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "lng": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "经度"
+                  },
+                  "lat": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "纬度"
+                  },
+                  "landmarkName": {
+                    "type": "string",
+                    "description": "照片主景点名称，可选"
+                  }
+                },
+                "required": [
+                  "lng",
+                  "lat"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "出游推荐生成成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultTravelPoiRecommendation"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "错误响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image/async-travel-plan": {
+      "post": {
+        "summary": "异步出游推荐（任务 + WebSocket 推送）",
+        "description": "提交出游推荐任务，立即返回 taskId，实际多模型讨论在后台异步执行，结果通过 WebSocket /ws/travel-plan 推送到前端。",
+        "operationId": "asyncTravelPlan",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "lng": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "经度"
+                  },
+                  "lat": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "纬度"
+                  },
+                  "landmarkName": {
+                    "type": "string",
+                    "description": "照片主景点名称，可选"
+                  }
+                },
+                "required": [
+                  "lng",
+                  "lat"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "任务提交成功，返回 taskId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultString"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "错误响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ws/travel-plan": {
+      "get": {
+        "summary": "出游推荐结果 WebSocket 连接（握手）",
+        "description": "通过 WebSocket 订阅异步出游推荐结果。前端需先调用 /api/image/async-travel-plan 获取 taskId，然后以 query 参数形式附加在连接 URL 上：ws://{host}:{port}/ws/travel-plan?taskId={taskId}。此处仅描述握手参数，实际数据推送不在 HTTP 响应体系内。",
+        "operationId": "travelPlanWebSocket",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "任务 ID，来源于 /api/image/async-travel-plan 返回的 data 字段。"
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket 协议升级成功"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ResultLocationResult": {
+        "type": "object",
+        "description": "地点识别接口返回包装结构。",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "业务状态码，200 表示成功。"
+          },
+          "message": {
+            "type": "string",
+            "description": "提示信息。"
+          },
+          "data": {
+            "$ref": "#/components/schemas/LocationResult"
+          }
+        }
+      },
+      "ResultTravelPoiRecommendation": {
+        "type": "object",
+        "description": "出游推荐接口返回包装结构。",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "业务状态码，200 表示成功。"
+          },
+          "message": {
+            "type": "string",
+            "description": "提示信息。"
+          },
+          "data": {
+            "$ref": "#/components/schemas/TravelPoiRecommendation"
+          }
+        }
+      },
+      "ResultString": {
+        "type": "object",
+        "description": "返回字符串（taskId）时的包装结构。",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "业务状态码，200 表示成功。"
+          },
+          "message": {
+            "type": "string",
+            "description": "提示信息。"
+          },
+          "data": {
+            "type": "string",
+            "description": "具体字符串内容，如 taskId。"
+          }
+        }
+      },
+      "ResultError": {
+        "type": "object",
+        "description": "错误返回包装结构。",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "错误码，通常为非 200 值（如 500）。"
+          },
+          "message": {
+            "type": "string",
+            "description": "错误信息。"
+          },
+          "data": {
+            "nullable": true,
+            "description": "错误场景下一般为 null。"
+          }
+        }
+      },
+      "LocationResult": {
+        "type": "object",
+        "description": "图片地点识别结果模型。",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "识别来源：EXIF, BAIDU, PICARTA。"
+          },
+          "formattedAddress": {
+            "type": "string",
+            "description": "详细地址。"
+          },
+          "country": {
+            "type": "string",
+            "description": "国家。"
+          },
+          "province": {
+            "type": "string",
+            "description": "省份。"
+          },
+          "city": {
+            "type": "string",
+            "description": "城市。"
+          },
+          "district": {
+            "type": "string",
+            "description": "区县。"
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "description": "经度。"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "description": "纬度。"
+          },
+          "confidence": {
+            "type": "number",
+            "format": "double",
+            "description": "置信度 (0-1)。"
+          },
+          "landmarkName": {
+            "type": "string",
+            "description": "识别到的地标名称（如果适用）。"
+          },
+          "travelPlan": {
+            "$ref": "#/components/schemas/TravelPoiRecommendation",
+            "description": "出游推荐结果，当前识别接口默认不自动填充，可为空。"
+          }
+        }
+      },
+      "TravelPoiRecommendation": {
+        "type": "object",
+        "description": "多 AI 出游推荐整体结果模型。",
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "description": "图片主景点所在纬度。"
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "description": "图片主景点所在经度。"
+          },
+          "photoSpotName": {
+            "type": "string",
+            "description": "照片中主景点名称。"
+          },
+          "photoSpotCaption": {
+            "type": "string",
+            "description": "针对照片主景点的文艺文案描述。"
+          },
+          "items": {
+            "type": "array",
+            "description": "推荐的出游 POI 列表。",
+            "items": {
+              "$ref": "#/components/schemas/TravelPoiRecommendationItem"
+            }
+          }
+        }
+      },
+      "TravelPoiRecommendationItem": {
+        "type": "object",
+        "description": "单个出游 POI 推荐明细。",
+        "properties": {
+          "poiName": {
+            "type": "string",
+            "description": "景点名称。"
+          },
+          "address": {
+            "type": "string",
+            "description": "景点地址。"
+          },
+          "scene": {
+            "type": "string",
+            "description": "适合的游玩场景描述，例如 \"夜景散步\"、\"拍照打卡\"。"
+          },
+          "bestVisitTime": {
+            "type": "string",
+            "description": "最佳游玩时间段。"
+          },
+          "recommendation": {
+            "type": "string",
+            "description": "推荐理由。"
+          },
+          "caption": {
+            "type": "string",
+            "description": "景点对应的文艺文案。"
+          },
+          "url": {
+            "type": "string",
+            "description": "景点相关图片或详情链接地址。"
+          }
+        }
+      },
+      "ProcessResult": {
+        "type": "object",
+        "description": "图片美化处理阶段单次调用的结果模型，对应 SSE 事件中的 data JSON。",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "处理类型，例如 contrast_enhance、dehaze、selfie_anime。"
+          },
+          "success": {
+            "type": "boolean",
+            "description": "当前处理是否成功。"
+          },
+          "message": {
+            "type": "string",
+            "description": "提示信息，失败时为错误原因。"
+          },
+          "imageBase64": {
+            "type": "string",
+            "description": "处理后图片的 Base64 字符串（成功时存在）。"
+          }
+        }
+      }
+    }
+  }
+}

@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
-//@DubboService
+// @DubboService
 public class TripPlanServiceImpl implements TripPlanService {
     private static final Logger log = LoggerFactory.getLogger(TripPlanServiceImpl.class);
 
@@ -60,7 +60,6 @@ public class TripPlanServiceImpl implements TripPlanService {
 
     private final AmapPoiUtils amapPoiUtils;
 
-
     private final CloseableHttpClient httpClient = HttpClients.createDefault();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ChatModel chatModel;
@@ -77,14 +76,6 @@ public class TripPlanServiceImpl implements TripPlanService {
         log.info("开始生成行程：{}，{}，{}", city, days, preference);
         // 1. 初始化SSE，设置超时时间
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
-        // 设置响应头，指定UTF-8编码（关键）
-        HttpServletResponse response = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();
-        if (response != null) {
-            response.setContentType("text/event-stream; charset=utf-8");
-        }
-        if (response != null) {
-            response.setCharacterEncoding("UTF-8");
-        }
         // 2. 注册SSE回调，避免资源泄漏
         registerSseCallbacks(emitter);
 
@@ -98,8 +89,9 @@ public class TripPlanServiceImpl implements TripPlanService {
                 }
 
                 // 获取城市景点
-//                List<Map<String, Object>> spots = getCityScenicSpots(city);
-                List<Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(tripPlanItem.getLng(), tripPlanItem.getLat());
+                // List<Map<String, Object>> spots = getCityScenicSpots(city);
+                List<Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(tripPlanItem.getLng(),
+                        tripPlanItem.getLat());
                 if (spots.isEmpty()) {
                     sendError(emitter, "未获取到[" + city + "]的景点数据");
                     completeEmitter(emitter);
@@ -115,7 +107,6 @@ public class TripPlanServiceImpl implements TripPlanService {
                     weatherPayload.put("days", weather);
                     sendWeather(emitter, weatherPayload);
                 }
-
 
                 // 初始化每日景点/颜色配置
                 String[] colors = new String[] { "#FF5733", "#33A1FF", "#33FF57", "#FF33A1", "#FFA533" };
@@ -192,9 +183,9 @@ public class TripPlanServiceImpl implements TripPlanService {
                                 if (StringUtils.hasText(buf.toString())) {
                                     // 使用新的括号匹配方法检查剩余的完整JSON
                                     Map<String, Integer> finalState = extractCompleteJson(buf, completeJsonList,
-                                        lastProcessedJson.get("lastProcessedPosition"),
-                                        lastProcessedJson.get("lastLeftBracketCount"),
-                                        lastProcessedJson.get("lastRightBracketCount"));
+                                            lastProcessedJson.get("lastProcessedPosition"),
+                                            lastProcessedJson.get("lastLeftBracketCount"),
+                                            lastProcessedJson.get("lastRightBracketCount"));
 
                                     lastProcessedJson.clear();
                                     lastProcessedJson.putAll(finalState);
@@ -215,7 +206,7 @@ public class TripPlanServiceImpl implements TripPlanService {
                     } catch (InterruptedException ignored) {
                     }
                 }
-                
+
                 // 确保在所有处理完成后才关闭SSE连接
                 sendDone(emitter);
                 completeEmitter(emitter);
@@ -242,13 +233,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder(AMAP_PLACE_URL);
             uriBuilder.setParameter("keywords", "景点")
-                     .setParameter("city", city)
-                     .setParameter("types", SCENIC_TYPE)
-                     .setParameter("key", amapKey)
-                     .setParameter("offset", String.valueOf(AMAP_OFFSET))
-                     .setParameter("page", String.valueOf(AMAP_PAGE))
-                     .setParameter("extensions", "all")
-                     .setParameter("citylimit", "true"); // 添加citylimit参数
+                    .setParameter("city", city)
+                    .setParameter("types", SCENIC_TYPE)
+                    .setParameter("key", amapKey)
+                    .setParameter("offset", String.valueOf(AMAP_OFFSET))
+                    .setParameter("page", String.valueOf(AMAP_PAGE))
+                    .setParameter("extensions", "all")
+                    .setParameter("citylimit", "true"); // 添加citylimit参数
 
             URI uri = uriBuilder.build();
             log.info("构建的景点查询URI: {}", uri.toString());
@@ -273,7 +264,7 @@ public class TripPlanServiceImpl implements TripPlanService {
                         String location = poi.path("location").asText("");
                         String address = poi.path("address").asText("");
                         String rating = poi.path("rating").asText("");
-                        //拿到photos的json数组
+                        // 拿到photos的json数组
                         JsonNode photos = poi.path("photos");
                         String photoUrl = !photos.isEmpty() ? photos.get(0).path("url").asText("") : "";
                         // 过滤无效经纬度
@@ -314,14 +305,15 @@ public class TripPlanServiceImpl implements TripPlanService {
     /**
      * 从缓冲区中增量解析"完整的JSON对象"，剩余内容保留在缓冲区中
      * 核心逻辑：用括号匹配的方式识别完整JSON，未解析的内容保留在缓冲区中
-     * @param buf 字符串缓冲区
-     * @param completeJsonList 用于存储解析到的完整JSON对象的列表
+     * 
+     * @param buf                   字符串缓冲区
+     * @param completeJsonList      用于存储解析到的完整JSON对象的列表
      * @param lastProcessedPosition 上次处理的位置
-     * @param lastLeftBracketCount 上次处理的左括号计数
+     * @param lastLeftBracketCount  上次处理的左括号计数
      * @param lastRightBracketCount 上次处理的右括号计数
      * @return 包含更新后状态的映射
      */
-    private Map<String, Integer> extractCompleteJson(StringBuilder buf, List<String> completeJsonList, 
+    private Map<String, Integer> extractCompleteJson(StringBuilder buf, List<String> completeJsonList,
             int lastProcessedPosition, int lastLeftBracketCount, int lastRightBracketCount) {
         Map<String, Integer> result = new HashMap<>();
 
@@ -341,15 +333,15 @@ public class TripPlanServiceImpl implements TripPlanService {
             } else if (c == '}') {
                 lastRightBracketCount++;
             }
-            
+
             // 当左右括号数量相等且大于0时，说明找到了一个完整的JSON对象
             if (lastLeftBracketCount == lastRightBracketCount && lastLeftBracketCount > 0) {
                 String completeJson = buf.substring(0, i + 1);
                 completeJsonList.add(completeJson);
-                
+
                 // 删除已处理的部分
                 buf.delete(0, i + 1);
-                
+
                 // 重置计数器，从头开始处理剩余内容
                 lastLeftBracketCount = 0;
                 lastRightBracketCount = 0;
@@ -361,7 +353,7 @@ public class TripPlanServiceImpl implements TripPlanService {
         result.put("lastProcessedPosition", i > 0 ? i : 0);
         result.put("lastLeftBracketCount", lastLeftBracketCount);
         result.put("lastRightBracketCount", lastRightBracketCount);
-        
+
         return result;
     }
 
@@ -385,13 +377,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder(AMAP_PLACE_URL);
             uriBuilder.setParameter("keywords", spotName)
-                     .setParameter("city", city)
-                     .setParameter("types", SCENIC_TYPE)
-                     .setParameter("key", amapKey)
-                     .setParameter("offset", "1")
-                     .setParameter("page", "1")
-                     .setParameter("extensions", "all")
-                     .setParameter("citylimit", "true"); // 添加citylimit参数
+                    .setParameter("city", city)
+                    .setParameter("types", SCENIC_TYPE)
+                    .setParameter("key", amapKey)
+                    .setParameter("offset", "1")
+                    .setParameter("page", "1")
+                    .setParameter("extensions", "all")
+                    .setParameter("citylimit", "true"); // 添加citylimit参数
 
             URI uri = uriBuilder.build();
             log.info("构建的景点补全URI: {}", uri.toString());
@@ -456,10 +448,10 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder(AMAP_DRIVING_URL);
             uriBuilder.setParameter("origin", origin)
-                     .setParameter("destination", destination)
-                     .setParameter("waypoints", waypoints)
-                     .setParameter("key", amapKey)
-                     .setParameter("strategy", String.valueOf(ROUTE_STRATEGY));
+                    .setParameter("destination", destination)
+                    .setParameter("waypoints", waypoints)
+                    .setParameter("key", amapKey)
+                    .setParameter("strategy", String.valueOf(ROUTE_STRATEGY));
 
             URI uri = uriBuilder.build();
             log.info("构建的路线规划URI: {}", uri.toString());
@@ -532,49 +524,50 @@ public class TripPlanServiceImpl implements TripPlanService {
         String city = tripPlanItem.getCity();
         String title = tripPlanItem.getTitle();
         // 简化Prompt，避免过长；明确JSON格式要求
-        return String.format("""
-                你是专业的旅游行程规划师，请以%s城市的%s景点为中心(若中心景点名字与城市名字一样的话则忽略景点，若景点名字和城市名字不一样的话则下文规划中一定要出现景点的名字，景点的经纬度分别是%s和%s)规划%d天的行程，偏好%s。请严格按照以下规范输出：
-                中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
-                【重要规则】
-                1. 必须为所有%d天都规划景点，不能遗漏任何一天
-                2. 仅从以下景点中选择（保留name/lng/lat/address/url字段）：%s和中心景点，即%s,中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
-                3. 每天景点按"不回头"的地理顺序排列，每天推荐3-4个景点
-                4. 每生成1个景点，仅返回1段独立的JSON，格式必须为：
-                   {"day": 数字, "spot": {"name": "景点名", "lng": 经度, "lat": 纬度, "address": "地址","url":"https://example.com"}, "color": "颜色码"}
-                5. 每天生成完所有景点后，返回1段标记完成的JSON：
-                   {"day": 数字, "isDayComplete": true, "color": "颜色码"}
-                6. 不同天数使用指定颜色：%s
-                7. 不要返回任何多余文字、注释、换行或符号，仅返回上述JSON片段
-                8. 严格按照以上规则执行，确保生成完整的行程规划
-                9. 必须持续生成直到所有天数的景点都规划完毕，不能提前结束
-                10.中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
-                
-                【强制约束】
-                - 只能输出JSON格式，不能输出任何其他文字
-                - JSON必须完整且语法正确
-                - 每个JSON对象必须独立完整，不能有嵌套或截断
-                - 所有字段都必须存在且类型正确
-                - day字段必须是整数，从1开始连续递增
-                - spot字段必须包含name/lng/lat/address/url五个子字段
-                - lng/lat必须是浮点数格式
-                - color必须是十六进制颜色码格式，如"#FF5733"
-                - 每天必须有isDayComplete标记才算完成
-                - 输出必须严格按照一行一个JSON对象的格式
-                
-                【错误示例】（禁止这样做）
-                1. 不要输出解释性文字：如"第一天行程如下："等
-                2. 不要输出代码块标记：如```json等
-                3. 不要合并多个JSON对象：如[{"day":1...},{"day":1...}]等
-                4. 不要缺少字段：每个景点JSON必须包含所有必需字段
-                
-                【正确示例】（严格按照此格式逐行输出）
-                {"day": 1, "spot": {"name": "故宫博物院", "lng": 116.397026, "lat": 39.918058, "address": "北京市东城区景山前街4号","url":"https://example.com"}, "color": "#FF5733"}
-                {"day": 1, "spot": {"name": "景山公园", "lng": 116.396472, "lat": 39.924091, "address": "北京市东城区景山前街44号","url":"https://example.com"}, "color": "#FF5733"}
-                {"day": 1, "isDayComplete": true, "color": "#FF5733"}
-                {"day": 2, "spot": {"name": "颐和园", "lng": 116.273503, "lat": 39.999612, "address": "北京市海淀区新建宫门路19号","url":"https://example.com"}, "color": "#33A1FF"}
-                {"day": 2, "spot": {"name": "圆明园遗址公园", "lng": 116.306348, "lat": 40.001602, "address": "北京市海淀区清华西路28号","url":"https://example.com"}, "color": "#33A1FF"}
-                {"day": 2, "isDayComplete": true, "color": "#33A1FF"}
-                """,
+        return String.format(
+                """
+                        你是专业的旅游行程规划师，请以%s城市的%s景点为中心(若中心景点名字与城市名字一样的话则忽略景点，若景点名字和城市名字不一样的话则下文规划中一定要出现景点的名字，景点的经纬度分别是%s和%s)规划%d天的行程，偏好%s。请严格按照以下规范输出：
+                        中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
+                        【重要规则】
+                        1. 必须为所有%d天都规划景点，不能遗漏任何一天
+                        2. 仅从以下景点中选择（保留name/lng/lat/address/url字段）：%s和中心景点，即%s,中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
+                        3. 每天景点按"不回头"的地理顺序排列，每天推荐3-4个景点
+                        4. 每生成1个景点，仅返回1段独立的JSON，格式必须为：
+                           {"day": 数字, "spot": {"name": "景点名", "lng": 经度, "lat": 纬度, "address": "地址","url":"https://example.com"}, "color": "颜色码"}
+                        5. 每天生成完所有景点后，返回1段标记完成的JSON：
+                           {"day": 数字, "isDayComplete": true, "color": "颜色码"}
+                        6. 不同天数使用指定颜色：%s
+                        7. 不要返回任何多余文字、注释、换行或符号，仅返回上述JSON片段
+                        8. 严格按照以上规则执行，确保生成完整的行程规划
+                        9. 必须持续生成直到所有天数的景点都规划完毕，不能提前结束
+                        10.中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
+
+                        【强制约束】
+                        - 只能输出JSON格式，不能输出任何其他文字
+                        - JSON必须完整且语法正确
+                        - 每个JSON对象必须独立完整，不能有嵌套或截断
+                        - 所有字段都必须存在且类型正确
+                        - day字段必须是整数，从1开始连续递增
+                        - spot字段必须包含name/lng/lat/address/url五个子字段
+                        - lng/lat必须是浮点数格式
+                        - color必须是十六进制颜色码格式，如"#FF5733"
+                        - 每天必须有isDayComplete标记才算完成
+                        - 输出必须严格按照一行一个JSON对象的格式
+
+                        【错误示例】（禁止这样做）
+                        1. 不要输出解释性文字：如"第一天行程如下："等
+                        2. 不要输出代码块标记：如```json等
+                        3. 不要合并多个JSON对象：如[{"day":1...},{"day":1...}]等
+                        4. 不要缺少字段：每个景点JSON必须包含所有必需字段
+
+                        【正确示例】（严格按照此格式逐行输出）
+                        {"day": 1, "spot": {"name": "故宫博物院", "lng": 116.397026, "lat": 39.918058, "address": "北京市东城区景山前街4号","url":"https://example.com"}, "color": "#FF5733"}
+                        {"day": 1, "spot": {"name": "景山公园", "lng": 116.396472, "lat": 39.924091, "address": "北京市东城区景山前街44号","url":"https://example.com"}, "color": "#FF5733"}
+                        {"day": 1, "isDayComplete": true, "color": "#FF5733"}
+                        {"day": 2, "spot": {"name": "颐和园", "lng": 116.273503, "lat": 39.999612, "address": "北京市海淀区新建宫门路19号","url":"https://example.com"}, "color": "#33A1FF"}
+                        {"day": 2, "spot": {"name": "圆明园遗址公园", "lng": 116.306348, "lat": 40.001602, "address": "北京市海淀区清华西路28号","url":"https://example.com"}, "color": "#33A1FF"}
+                        {"day": 2, "isDayComplete": true, "color": "#33A1FF"}
+                        """,
                 city,
                 title,
                 tripPlanItem.getLat(),
@@ -592,13 +585,13 @@ public class TripPlanServiceImpl implements TripPlanService {
             if (resp == null || resp.getResults() == null || resp.getResults().isEmpty()) {
                 return null;
             }
-            
+
             // 修复空指针异常：检查getText()返回值是否为null
             String text = resp.getResults().get(0).getOutput().getText();
             if (text == null) {
                 return null;
             }
-            
+
             // 提取内容并过滤：去除首尾空格、换行、制表符
             String content = text.replaceAll("\\n+", "")
                     .replaceAll("\\t+", "");
@@ -654,13 +647,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         if (!StringUtils.hasText(jsonStr)) {
             return false;
         }
-        
+
         // 基本格式检查
         jsonStr = jsonStr.trim();
         if (!jsonStr.startsWith("{") || !jsonStr.endsWith("}")) {
             return false;
         }
-        
+
         try {
             mapper.readTree(jsonStr);
             return true;
@@ -681,7 +674,7 @@ public class TripPlanServiceImpl implements TripPlanService {
                 log.warn("AI返回无效JSON：{}", jsonStr);
                 return;
             }
-            
+
             Map<String, Object> data = mapper.readValue(jsonStr, Map.class);
 
             // 处理错误信息
@@ -721,20 +714,20 @@ public class TripPlanServiceImpl implements TripPlanService {
                 log.warn("AI返回数据缺少day字段：{}", jsonStr);
                 return;
             }
-            
+
             if (!StringUtils.hasText(color)) {
                 log.warn("AI返回数据缺少color字段或color为空：{}", jsonStr);
                 return;
             }
-            
+
             if (spotObj == null) {
                 log.warn("AI返回数据缺少spot字段：{}", jsonStr);
                 return;
             }
-            
+
             // 验证spot对象的必需字段
-            if (!spotObj.containsKey("name") || !spotObj.containsKey("lng") || 
-                !spotObj.containsKey("lat") || !spotObj.containsKey("address")) {
+            if (!spotObj.containsKey("name") || !spotObj.containsKey("lng") ||
+                    !spotObj.containsKey("lat") || !spotObj.containsKey("address")) {
                 log.warn("AI返回的spot对象缺少必要字段：{}", jsonStr);
                 return;
             }
@@ -797,8 +790,7 @@ public class TripPlanServiceImpl implements TripPlanService {
      */
     private void sendData(SseEmitter emitter, Object data) {
         try {
-            String jsonData = mapper.writeValueAsString(data);
-            emitter.send(SseEmitter.event().data(jsonData, MediaType.APPLICATION_JSON).name("trip-data"));
+            emitter.send(SseEmitter.event().data(data, MediaType.APPLICATION_JSON).name("trip-data"));
         } catch (Exception e) {
             log.error("推送SSE数据失败", e);
         }
@@ -811,8 +803,7 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             Map<String, Object> error = new HashMap<>();
             error.put("error", message);
-            String jsonData = mapper.writeValueAsString(error);
-            emitter.send(SseEmitter.event().data(jsonData,MediaType.APPLICATION_JSON).name("trip-error"));
+            emitter.send(SseEmitter.event().data(error, MediaType.APPLICATION_JSON).name("trip-error"));
         } catch (Exception e) {
             log.error("推送SSE错误信息失败", e);
         }
@@ -823,7 +814,7 @@ public class TripPlanServiceImpl implements TripPlanService {
      */
     private void sendDone(SseEmitter emitter) {
         try {
-            emitter.send(SseEmitter.event().data("[DONE]",MediaType.APPLICATION_JSON).name("trip-done"));
+            emitter.send(SseEmitter.event().data("[DONE]", MediaType.TEXT_PLAIN).name("trip-done"));
         } catch (Exception e) {
             log.error("推送SSE完成标记失败", e);
         }
@@ -831,8 +822,7 @@ public class TripPlanServiceImpl implements TripPlanService {
 
     private void sendWeather(SseEmitter emitter, Object data) {
         try {
-            String jsonData = mapper.writeValueAsString(data);
-            emitter.send(SseEmitter.event().data(jsonData,MediaType.APPLICATION_JSON).name("trip-weather"));
+            emitter.send(SseEmitter.event().data(data, MediaType.APPLICATION_JSON).name("trip-weather"));
         } catch (Exception e) {
             log.error("推送SSE天气信息失败", e);
         }
@@ -868,8 +858,8 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder("https://restapi.amap.com/v3/weather/weatherInfo");
             uriBuilder.setParameter("city", city)
-                     .setParameter("key", amapKey)
-                     .setParameter("extensions", "all");
+                    .setParameter("key", amapKey)
+                    .setParameter("extensions", "all");
 
             URI uri = uriBuilder.build();
             log.info("构建的天气查询URI: {}", uri.toString());

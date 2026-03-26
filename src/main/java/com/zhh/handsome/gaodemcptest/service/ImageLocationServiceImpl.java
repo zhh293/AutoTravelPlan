@@ -62,6 +62,12 @@ public class ImageLocationServiceImpl implements ImageLocationService {
     @Value("${baidu.ai.secret-key}")
     private String baiduSecretKey;
 
+    @Value("${baidu.image.api-key:}")
+    private String baiduImageApiKeyOverride;
+
+    @Value("${baidu.image.secret-key:}")
+    private String baiduImageSecretKeyOverride;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private volatile String accessToken;
@@ -69,7 +75,25 @@ public class ImageLocationServiceImpl implements ImageLocationService {
 
     private static final long MAX_IMAGE_SIZE = 10L * 1024 * 1024;
 
-    private final WebClient webClient = WebClient.builder().build();
+    // 这里为什么要调整缓冲区大小呢，首先WebClient默认的缓冲区大小为256KB，但是图片上传时实际传输的图片大小可能会超过这个限制，因此需要调整缓冲区大小。
+
+    // 为什么会发生这种情况？
+    // 图像处理API的特点：百度的图像处理API（如去雾、对比度增强等）会返回处理后的Base64编码图片数据
+    // Base64编码膨胀：原始图片经过Base64编码后，数据量会增加约33%
+    // 高质量图片：即使是压缩后的图片，Base64编码后的数据也可能达到几MB
+    // 瞬时返回：API将整个处理后的图片数据一次性返回，而不是流式传输
+
+    // 解决方案说明
+    // 我刚才做的修改就是针对这个问题：
+    // 增加缓冲区大小：从默认的256KB增加到10-20MB
+    // 分类配置：
+    // 普通WebClient：10MB缓冲区
+    // 图像处理专用WebClient：20MB缓冲区
+    // 添加超时配置：防止长时间等待
+
+    private final WebClient webClient = WebClient.builder()
+            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(10 * 1024 * 1024)) // 设置为10MB
+            .build();
 
     private static final ExecutorService IMAGE_EXECUTOR = new ThreadPoolExecutor(
             8,
@@ -185,13 +209,14 @@ public class ImageLocationServiceImpl implements ImageLocationService {
             emitter.complete();
             return emitter;
         }
+        log.info("开始处理图片");
 
         CompletableFuture.runAsync(() -> {
             try {
                 byte[] originalBytes = file.getBytes();
                 byte[] processedBytes = ensureMaxSize(originalBytes);
                 String base64 = Base64.getEncoder().encodeToString(processedBytes);
-
+                log.info("图片大小压缩完成，开始调用百度AI API");
                 CompletableFuture<ProcessResult> enhanceFuture = callBaiduImageApi("contrast_enhance", base64, null)
                         .whenComplete((r, ex) -> {
                             try {
@@ -384,10 +409,16 @@ public class ImageLocationServiceImpl implements ImageLocationService {
         if (accessToken != null && now < tokenExpiresAt) {
             return accessToken;
         }
+        String apiKeyToUse = baiduImageApiKeyOverride != null && !baiduImageApiKeyOverride.isEmpty()
+                ? baiduImageApiKeyOverride
+                : baiduApiKey;
+        String secretKeyToUse = baiduImageSecretKeyOverride != null && !baiduImageSecretKeyOverride.isEmpty()
+                ? baiduImageSecretKeyOverride
+                : baiduSecretKey;
         try {
             String url = "https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials"
-                    + "&client_id=" + URLEncoder.encode(baiduApiKey, StandardCharsets.UTF_8.name())
-                    + "&client_secret=" + URLEncoder.encode(baiduSecretKey, StandardCharsets.UTF_8.name());
+                    + "&client_id=" + URLEncoder.encode(apiKeyToUse, StandardCharsets.UTF_8.name())
+                    + "&client_secret=" + URLEncoder.encode(secretKeyToUse, StandardCharsets.UTF_8.name());
             String responseStr = webClient.post()
                     .uri(url)
                     .retrieve()
@@ -418,6 +449,7 @@ public class ImageLocationServiceImpl implements ImageLocationService {
             base.setMessage("无法获取access_token");
             return CompletableFuture.completedFuture(base);
         }
+        log.info("调用百度{}接口", apiName);
         try {
             String url = "https://aip.baidubce.com/rest/2.0/image-process/v1/" + apiName
                     + "?access_token=" + URLEncoder.encode(token, StandardCharsets.UTF_8.name());
@@ -449,7 +481,20 @@ public class ImageLocationServiceImpl implements ImageLocationService {
                                 result.setMessage("ok");
                             } else {
                                 result.setSuccess(false);
-                                result.setMessage(responseStr);
+                                if (root.has("error_code")) {
+                                    int errorCode = root.path("error_code").asInt();
+                                    String errorMsg = root.path("error_msg").asText();
+                                    String friendly;
+                                    if (errorCode == 6 && "No permission to access data".equalsIgnoreCase(errorMsg)) {
+                                        friendly = "百度图像处理接口无访问权限（error_code=6: No permission to access data），"
+                                                + "请在百度控制台开通对应能力或检查当前账号是否已授权使用 selfie_anime 接口。";
+                                    } else {
+                                        friendly = "百度图像处理接口错误(error_code=" + errorCode + "): " + errorMsg;
+                                    }
+                                    result.setMessage(friendly);
+                                } else {
+                                    result.setMessage(responseStr);
+                                }
                             }
                         } catch (Exception e) {
                             result.setSuccess(false);

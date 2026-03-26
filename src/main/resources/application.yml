@@ -1,5 +1,9 @@
 server:
   port: 8082
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
 
 spring:
   application:
@@ -32,10 +36,26 @@ baidu:
     app-id: 122045146
     api-key: 2M3uJOYG4MYVwvw6pU9EQTHI
     secret-key: 8qxgrmbMC4Gpn1OMGPqaQKKQ2sHKWmHn
-
+  image:
+    api-key: c9Yj8yXPZVVNQCQLlo3ZDjJD
+    secret-key: KqUJvKH6XU7PsJEG2Hrjms8cerfRg4PF
 picarta:
   api:
     token: NELSF44ME5JBBVWCKQZW
+
+netty:
+  websocket:
+    port: 8090
+    path: /ws/travel-plan
+    heartbeat-seconds: 30
+
+timeout:
+  queue:
+    task-timeout-millis: 600000
+    visibility-millis: 30000
+    scan-interval-millis: 5000
+    scan-batch-size: 100
+    lock-ttl-millis: 5000
 
 #dubbo:
 #  application:
