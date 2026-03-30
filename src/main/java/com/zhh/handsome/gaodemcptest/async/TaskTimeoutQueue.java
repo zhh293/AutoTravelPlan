@@ -1,9 +1,10 @@
 package com.zhh.handsome.gaodemcptest.async;
 
-import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.serializer.RedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -11,7 +12,6 @@ import java.util.Collections;
 import java.util.List;
 
 @Component
-@RequiredArgsConstructor
 public class TaskTimeoutQueue {
 
     private static final String DELAY_ZSET = "travel-plan:timeout:zset";
@@ -19,6 +19,7 @@ public class TaskTimeoutQueue {
     private static final String READY_LIST = "travel-plan:timeout:ready:list";
     private static final String RETRY_HASH = "travel-plan:timeout:retry:hash";
     private static final String DLQ_LIST = "travel-plan:timeout:dlq:list";
+    private static final RedisSerializer<String> SCRIPT_ARG_SERIALIZER = new StringRedisSerializer();
     private final RedisTemplate<String, Object> redisTemplate;
     private final DefaultRedisScript<List> moveDueScript = buildMoveDueScript();
     private final DefaultRedisScript<List> reclaimScript = buildReclaimScript();
@@ -53,7 +54,7 @@ public class TaskTimeoutQueue {
     }
 
     public List<String> moveDue(long nowMillis, int limit) {
-        Object result = redisTemplate.execute(
+        Object result = executeListScript(
                 moveDueScript,
                 List.of(DELAY_ZSET, READY_LIST, RETRY_HASH),
                 String.valueOf(nowMillis),
@@ -62,7 +63,7 @@ public class TaskTimeoutQueue {
     }
 
     public List<String> reclaim(long nowMillis, int limit) {
-        Object result = redisTemplate.execute(
+        Object result = executeListScript(
                 reclaimScript,
                 List.of(PROCESSING_ZSET, READY_LIST, RETRY_HASH, DLQ_LIST),
                 String.valueOf(nowMillis),
@@ -90,7 +91,7 @@ public class TaskTimeoutQueue {
         if (limit <= 0) {
             return Collections.emptyList();
         }
-        Object result = redisTemplate.execute(
+        Object result = executeListScript(
                 reserveFromReadyScript,
                 List.of(READY_LIST, PROCESSING_ZSET),
                 String.valueOf(limit),
@@ -195,5 +196,14 @@ public class TaskTimeoutQueue {
             out.add(String.valueOf(obj));
         }
         return out;
+    }
+
+    private Object executeListScript(DefaultRedisScript<List> script, List<String> keys, String... args) {
+        return redisTemplate.execute(script, SCRIPT_ARG_SERIALIZER, listResultSerializer(), keys, (Object[]) args);
+    }
+
+    @SuppressWarnings("unchecked")
+    private RedisSerializer<List> listResultSerializer() {
+        return (RedisSerializer<List>) (RedisSerializer<?>) RedisSerializer.string();
     }
 }

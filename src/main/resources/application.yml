@@ -41,7 +41,7 @@ baidu:
     secret-key: KqUJvKH6XU7PsJEG2Hrjms8cerfRg4PF
 picarta:
   api:
-    token: NELSF44ME5JBBVWCKQZW
+    token: ZJBOQ14A6YC5NAUBRYLR
 
 netty:
   websocket:
