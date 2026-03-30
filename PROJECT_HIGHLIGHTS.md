@@ -40,7 +40,20 @@
         3.  **Stage 3 (Synthesize)**: 综合高分答案生成最终结论。
     *   **价值**: 这种 **Chain-of-Thought (CoT)** 的工程化落地，显著提高了复杂意图识别的准确率，比单一 RAG 更智能。
 
-## ⚡ 亮点 4：基于 Redis List 的异步削峰填谷
+## 🌐 亮点 4：Netty WebSocket 独立通道与心跳治理
+**核心代码**: `com.zhh.handsome.gaodemcptest.websocket.netty` (GaoDeMCPTest)
+
+*   **面试切入点**: "为什么不用原生 WebSocket，而要引入 Netty？"
+*   **技术深度**:
+    *   **问题**: Spring WebSocket 依附于主容器，流量抖动和线程池压力会影响推送稳定性。
+    *   **解决方案**: 用 Netty 独立启动 WebSocket 服务，隔离主应用线程池。
+    *   **实现细节**:
+        *   **心跳机制**: `IdleStateHandler` 定期 Ping，及时发现断连。
+        *   **握手校验**: 升级阶段校验 `taskId`，无效连接直接拒绝。
+        *   **精准推送**: 发送器同时支持 Spring Session 和 Netty Channel。
+    *   **优势**: 推送链路更短、可控性更强、稳定性更高。
+
+## ⚡ 亮点 5：基于 Redis List 的异步削峰填谷
 **核心代码**: `com.zhh.handsome.gaodemcptest.async.TravelPlanTaskConsumer` (GaoDeMCPTest)
 
 *   **面试切入点**: "如果有大量用户同时请求生成旅行计划，系统怎么抗？"
@@ -53,7 +66,30 @@
         *   包含完善的**反序列化容错**机制，防止脏数据导致消费者线程崩溃。
     *   **优势**: 典型的**削峰填谷**策略，保护后端昂贵的 LLM 资源不被突发流量压垮。
 
-## 📱 亮点 5：高安全性的扫码登录全流程 (状态机设计)
+## 🧭 亮点 6：任务状态机 + 原子幂等流转
+**核心代码**: `com.zhh.handsome.gaodemcptest.async.TaskStateStore` (GaoDeMCPTest)
+
+*   **面试切入点**: "你是怎么保证异步任务在并发下不会乱序流转的？"
+*   **技术深度**:
+    *   **问题**: 异步任务存在并发更新、重复消息、状态回滚等风险。
+    *   **解决方案**: 用 Redis + Lua 实现 CAS 风格原子状态流转。
+    *   **实现细节**:
+        *   **状态机定义**: 明确 `CREATED → QUEUED → RUNNING → PUSHING → DONE/ERROR/EXPIRED` 的合法流转。
+        *   **原子校验**: 只有当当前状态与期望状态一致时才允许写入下一状态，否则拒绝更新。
+    *   **优势**: 幂等、并发安全、可追踪。
+
+## ⏱️ 亮点 7：企业级 Redis 延迟队列（双 ZSet + List）
+**核心代码**: `com.zhh.handsome.gaodemcptest.async.TaskTimeoutQueue` (GaoDeMCPTest)
+
+*   **面试切入点**: "延迟任务如何做到可靠投递与可恢复？"
+*   **技术深度**:
+    *   **结构**: `DELAY_ZSET` + `PROCESSING_ZSET` + `READY_LIST`。
+    *   **原子搬运**: Lua 脚本把到期任务从延迟集合原子转移到就绪队列，并写入可见性超时集合。
+    *   **回收机制**: 处理节点异常时，超时任务从 `PROCESSING_ZSET` 回收到 `READY_LIST`。
+    *   **分布式扫描锁**: 避免多实例重复扫描。
+    *   **可配置**: 超时阈值、可见性超时、扫描频率均支持配置化。
+
+## 📱 亮点 8：高安全性的扫码登录全流程 (状态机设计)
 **核心代码**: `com.tmd.controller.QRCodeController` (BasicBack)
 
 *   **面试切入点**: "扫码登录的交互流程是怎样的？如何保证安全？"
@@ -64,7 +100,7 @@
         2.  **手机端**: 携带 Token 扫描 -> 调用 `/scan` 接口修改状态为 `SCANNED` -> 点击确认调用 `/confirm` 交换 Token。
     *   **安全考量**: 二维码 ID 绑定过期时间，且确认接口必须校验手机端用户的 `Session/JWT`，防止伪造请求。
 
-## 💰 亮点 6：支付中台的最终一致性与幂等处理
+## 💰 亮点 9：支付中台的最终一致性与幂等处理
 **核心代码**: `com.tmd.service.impl.WechatPayServiceImpl` (BasicBack)
 
 *   **面试切入点**: "涉及金钱的业务，你是如何保证数据不出错的？"
@@ -75,7 +111,7 @@
         *   支付回调 (`handlePayNotify`) 采用**幂等设计**：收到回调先查单，如果状态已是 SUCCESS 则直接返回，防止微信重复通知导致的数据错误。
         *   退款逻辑包含完整的异常处理和状态同步。
 
-## 🗺️ 亮点 7：RAG (检索增强生成) 之地理数据锚定
+## 🗺️ 亮点 10：RAG (检索增强生成) 之地理数据锚定
 **核心代码**: `com.zhh.handsome.gaodemcptest.model.AmapPoiUtils`
 
 *   **面试切入点**: "如何解决 AI 在特定领域（如旅游）胡说八道的问题？"
@@ -85,7 +121,7 @@
     *   **Context 构建**: 将这些结构化数据清洗后通过 `buildPoiListText` 注入到 Prompt 中，强制 AI 只能从提供的真实列表中选择景点。
     *   **结果**: 彻底解决了 AI 编造不存在景点的 "幻觉" 问题。
 
-## 🛡️ 亮点 8：自定义注解式限流 (AOP + Redis)
+## 🛡️ 亮点 11：自定义注解式限流 (AOP + Redis)
 **核心代码**: `com.tmd.aspect.RateLimitAspect` (BasicBack)
 
 *   **面试切入点**: "如何防止某个 IP 恶意刷接口？"
@@ -93,27 +129,6 @@
     *   **实现**: 编写自定义注解 `@RateLimit`，利用 Spring AOP 切面拦截请求。
     *   **算法**: 基于 Redis 的计数器模式（或令牌桶算法）。Key 设计为 `rate_limit:ip:methodName`。
     *   **Lua 脚本**: 为了保证 "读取-判断-自增" 的原子性，使用了 Redis Lua 脚本执行限流逻辑，避免并发场景下的计数失效。
-
-## 🔧 亮点 9：生产级 Redis 诊断与自愈工具
-**核心代码**: `com.zhh.handsome.gaodemcptest.util.RedisDiagnostics` (GaoDeMCPTest)
-
-*   **面试切入点**: "上线后如何排查中间件故障？"
-*   **技术深度**:
-    *   **问题**: 生产环境 Redis 连接异常或序列化配置错误往往难以快速定位。
-    *   **方案**: 开发了专门的诊断工具类，支持运行时动态检测：
-        *   **连通性测试**: 自动读写测试 Key。
-        *   **序列化检查**: 打印当前 `KeySerializer` 和 `ValueSerializer` 的具体类名，防止出现乱码问题。
-        *   **队列积压监控**: 查看 List 队列的积压长度和首尾元素。
-    *   **体现**: 展现了**DevOps** 运维意识和系统稳定性治理能力。
-
-## 🔍 亮点 10：混合搜索架构 (MySQL + Elasticsearch)
-**核心代码**: `com.tmd.controller.SearchController` (BasicBack)
-
-*   **面试切入点**: "海量数据的搜索怎么做？"
-*   **技术深度**:
-    *   **架构**: 核心业务数据（如用户信息、订单）存 MySQL，内容型数据（如帖子、文章）同步至 Elasticsearch。
-    *   **同步策略**: 实现了 `PostsIndexInitializer` 和相关 Service，处理数据从数据库到搜索引擎的同步（全量/增量）。
-    *   **查询优化**: 利用 ES 的倒排索引实现分词搜索和高亮显示，解决了 MySQL `LIKE` 查询在数据量大时索引失效的问题。
 
 ---
 > **面试官贴士**: 在介绍这些亮点时，建议先说遇到的**困难**，再说**方案**，最后强调**收益**。上面的代码路径可以帮助你快速回顾具体实现细节。

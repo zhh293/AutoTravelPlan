@@ -53,6 +53,7 @@ timeout:
   queue:
     task-timeout-millis: 600000
     visibility-millis: 30000
+    max-retry-times: 3
     scan-interval-millis: 5000
     scan-batch-size: 100
     lock-ttl-millis: 5000

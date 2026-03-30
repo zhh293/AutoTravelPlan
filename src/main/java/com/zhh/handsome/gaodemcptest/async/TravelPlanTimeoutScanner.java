@@ -38,7 +38,7 @@ public class TravelPlanTimeoutScanner {
         try {
             taskTimeoutQueue.reclaim(now, batchSize);
             taskTimeoutQueue.moveDue(now, batchSize);
-            List<String> ready = taskTimeoutQueue.pollReady(batchSize);
+            List<String> ready = taskTimeoutQueue.reserveReady(now, batchSize);
             if (ready.isEmpty()) {
                 return;
             }
