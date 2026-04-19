@@ -23,9 +23,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.context.request.RequestContextHolder;
-import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.core.task.TaskExecutor;
 
@@ -38,6 +35,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.UUID;
 
 @Service
 // @DubboService
@@ -64,26 +62,50 @@ public class TripPlanServiceImpl implements TripPlanService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final ChatModel chatModel;
     private final TaskExecutor taskExecutor;
+    private final TripPlanStreamableSseStore streamableSseStore;
+    private final Map<String, AtomicBoolean> runningTasks = new ConcurrentHashMap<>();
+    private final Map<SseEmitter, String> emitterTaskMap = new ConcurrentHashMap<>();
 
-    public TripPlanServiceImpl(AmapPoiUtils amapPoiUtils, ChatModel chatModel, TaskExecutor tripTaskExecutor) {
+    public TripPlanServiceImpl(
+            AmapPoiUtils amapPoiUtils,
+            ChatModel chatModel,
+            TaskExecutor tripTaskExecutor,
+            TripPlanStreamableSseStore streamableSseStore) {
         this.amapPoiUtils = amapPoiUtils;
         this.chatModel = chatModel;
         this.taskExecutor = tripTaskExecutor;
+        this.streamableSseStore = streamableSseStore;
     }
 
-    public SseEmitter streamPlan(TripPlanItem tripPlanItem, int days, String preference) {
+    public SseEmitter streamPlan(TripPlanItem tripPlanItem, int days, String preference, String taskId,
+            String lastEventId) {
         String city = tripPlanItem.getCity();
+        String currentTaskId = StringUtils.hasText(taskId) ? taskId : UUID.randomUUID().toString();
         log.info("开始生成行程：{}，{}，{}", city, days, preference);
         // 1. 初始化SSE，设置超时时间
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
+        emitterTaskMap.put(emitter, currentTaskId);
         // 2. 注册SSE回调，避免资源泄漏
         registerSseCallbacks(emitter);
 
+        taskExecutor.execute(() -> resumeHistoryAndTailRealtime(emitter, currentTaskId, lastEventId));
+
+        boolean hasTaskId = StringUtils.hasText(taskId);
+        if (hasTaskId && (runningTasks.containsKey(currentTaskId) || streamableSseStore.hasAnyEvent(currentTaskId))) {
+            return emitter;
+        }
+
         taskExecutor.execute(() -> {
+            AtomicBoolean running = runningTasks.computeIfAbsent(currentTaskId, k -> new AtomicBoolean(false));
+            if (!running.compareAndSet(false, true)) {
+                return;
+            }
             try {
+                sendTaskMeta(emitter, currentTaskId);
                 // 校验入参
                 if (!StringUtils.hasText(city) || days < 1) {
                     sendError(emitter, "参数错误：城市不能为空，天数需≥1");
+                    streamableSseStore.markFinished(currentTaskId);
                     completeEmitter(emitter);
                     return;
                 }
@@ -94,6 +116,7 @@ public class TripPlanServiceImpl implements TripPlanService {
                         tripPlanItem.getLat());
                 if (spots.isEmpty()) {
                     sendError(emitter, "未获取到[" + city + "]的景点数据");
+                    streamableSseStore.markFinished(currentTaskId);
                     completeEmitter(emitter);
                     return;
                 }
@@ -209,16 +232,21 @@ public class TripPlanServiceImpl implements TripPlanService {
 
                 // 确保在所有处理完成后才关闭SSE连接
                 sendDone(emitter);
+                streamableSseStore.markFinished(currentTaskId);
                 completeEmitter(emitter);
             } catch (Exception e) {
                 log.error("行程规划主流程失败", e);
                 sendError(emitter, "系统异常：" + e.getMessage());
+                streamableSseStore.markFinished(currentTaskId);
                 // 确保在异常情况下也正确关闭emitter
                 try {
                     completeEmitter(emitter);
                 } catch (Exception ex) {
                     log.error("关闭SSE连接失败", ex);
                 }
+            } finally {
+                running.set(false);
+                runningTasks.remove(currentTaskId, running);
             }
         });
 
@@ -773,16 +801,34 @@ public class TripPlanServiceImpl implements TripPlanService {
             log.warn("SSE连接超时");
             sendError(emitter, "连接超时，请重试");
             emitter.complete();
+            emitterTaskMap.remove(emitter);
         });
 
         // 完成回调
-        emitter.onCompletion(() -> log.info("SSE连接正常关闭"));
+        emitter.onCompletion(() -> {
+            log.info("SSE连接正常关闭");
+            emitterTaskMap.remove(emitter);
+        });
 
         // 错误回调
         emitter.onError(ex -> {
             log.error("SSE连接异常", ex);
             emitter.completeWithError(ex);
+            emitterTaskMap.remove(emitter);
         });
+    }
+
+    private void resumeHistoryAndTailRealtime(SseEmitter emitter, String taskId, String lastEventId) {
+        try {
+            String cursor = streamableSseStore.replayHistory(taskId, lastEventId, emitter);
+            AtomicBoolean stop = new AtomicBoolean(false);
+            streamableSseStore.streamRealtimeUntilDone(taskId, cursor, emitter, stop);
+            if (streamableSseStore.isFinished(taskId)) {
+                completeEmitter(emitter);
+            }
+        } catch (Exception e) {
+            log.error("恢复SSE历史/实时续传失败, taskId={}", taskId, e);
+        }
     }
 
     /**
@@ -790,7 +836,13 @@ public class TripPlanServiceImpl implements TripPlanService {
      */
     private void sendData(SseEmitter emitter, Object data) {
         try {
-            emitter.send(SseEmitter.event().data(data, MediaType.APPLICATION_JSON).name("trip-data"));
+            String eventId = appendForEmitter(emitter, "trip-data", data);
+            SseEmitter.SseEventBuilder event = SseEmitter.event().data(data, MediaType.APPLICATION_JSON)
+                    .name("trip-data");
+            if (eventId != null) {
+                event.id(eventId);
+            }
+            emitter.send(event);
         } catch (Exception e) {
             log.error("推送SSE数据失败", e);
         }
@@ -803,7 +855,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             Map<String, Object> error = new HashMap<>();
             error.put("error", message);
-            emitter.send(SseEmitter.event().data(error, MediaType.APPLICATION_JSON).name("trip-error"));
+            String eventId = appendForEmitter(emitter, "trip-error", error);
+            SseEmitter.SseEventBuilder event = SseEmitter.event().data(error, MediaType.APPLICATION_JSON)
+                    .name("trip-error");
+            if (eventId != null) {
+                event.id(eventId);
+            }
+            emitter.send(event);
         } catch (Exception e) {
             log.error("推送SSE错误信息失败", e);
         }
@@ -814,7 +872,13 @@ public class TripPlanServiceImpl implements TripPlanService {
      */
     private void sendDone(SseEmitter emitter) {
         try {
-            emitter.send(SseEmitter.event().data("[DONE]", MediaType.TEXT_PLAIN).name("trip-done"));
+            String eventId = appendForEmitter(emitter, "trip-done", "[DONE]");
+            SseEmitter.SseEventBuilder event = SseEmitter.event().data("[DONE]", MediaType.TEXT_PLAIN)
+                    .name("trip-done");
+            if (eventId != null) {
+                event.id(eventId);
+            }
+            emitter.send(event);
         } catch (Exception e) {
             log.error("推送SSE完成标记失败", e);
         }
@@ -822,10 +886,40 @@ public class TripPlanServiceImpl implements TripPlanService {
 
     private void sendWeather(SseEmitter emitter, Object data) {
         try {
-            emitter.send(SseEmitter.event().data(data, MediaType.APPLICATION_JSON).name("trip-weather"));
+            String eventId = appendForEmitter(emitter, "trip-weather", data);
+            SseEmitter.SseEventBuilder event = SseEmitter.event().data(data, MediaType.APPLICATION_JSON)
+                    .name("trip-weather");
+            if (eventId != null) {
+                event.id(eventId);
+            }
+            emitter.send(event);
         } catch (Exception e) {
             log.error("推送SSE天气信息失败", e);
         }
+    }
+
+    private void sendTaskMeta(SseEmitter emitter, String taskId) {
+        try {
+            Map<String, Object> meta = new HashMap<>();
+            meta.put("taskId", taskId);
+            String eventId = appendForEmitter(emitter, "trip-meta", meta);
+            SseEmitter.SseEventBuilder event = SseEmitter.event().name("trip-meta").data(meta,
+                    MediaType.APPLICATION_JSON);
+            if (eventId != null) {
+                event.id(eventId);
+            }
+            emitter.send(event);
+        } catch (Exception e) {
+            log.error("推送SSE任务元信息失败", e);
+        }
+    }
+
+    private String appendForEmitter(SseEmitter emitter, String eventName, Object payload) {
+        String taskId = emitterTaskMap.get(emitter);
+        if (!StringUtils.hasText(taskId)) {
+            return null;
+        }
+        return streamableSseStore.appendEvent(taskId, eventName, payload);
     }
 
     /**

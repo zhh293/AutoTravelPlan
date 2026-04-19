@@ -19,6 +19,8 @@ public class TripPlanController {
             @RequestBody TripPlanItem tripPlanItem,
             @RequestParam(value = "days", defaultValue = "3") int days,
             @RequestParam(value = "preference", required = false) String preference,
+            @RequestParam(value = "taskId", required = false) String taskId,
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
             HttpServletResponse response) {
         response.setCharacterEncoding("UTF-8");
         response.setContentType("text/event-stream;charset=UTF-8");
@@ -26,6 +28,6 @@ public class TripPlanController {
             days = 1;
         if (days > 10)
             days = 10;
-        return tripPlanService.streamPlan(tripPlanItem, days, preference);
+        return tripPlanService.streamPlan(tripPlanItem, days, preference, taskId, lastEventId);
     }
 }
