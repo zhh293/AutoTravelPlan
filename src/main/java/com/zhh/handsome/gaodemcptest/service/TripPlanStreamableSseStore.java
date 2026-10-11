@@ -3,7 +3,7 @@ package com.zhh.handsome.gaodemcptest.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.Limit;
+import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.ReadOffset;
@@ -35,13 +35,13 @@ public class TripPlanStreamableSseStore {
     private final ObjectMapper objectMapper;
 
     @Value("${trip.sse.stream.retention-seconds:300}")
-    private long retentionSeconds;
+    private long retentionSeconds = 300;
 
     @Value("${trip.sse.stream.read-batch-size:100}")
-    private int readBatchSize;
+    private int readBatchSize = 100;
 
     @Value("${trip.sse.stream.block-seconds:5}")
-    private long blockSeconds;
+    private long blockSeconds = 5;
 
     public TripPlanStreamableSseStore(RedisTemplate<String, Object> redisTemplate) {
         this.redisTemplate = redisTemplate;
@@ -66,9 +66,9 @@ public class TripPlanStreamableSseStore {
 
         List<MapRecord<String, Object, Object>> records;
         if ("0-0".equals(cursor)) {
-            records = ops.range(streamKey, Range.unbounded(), Limit.of(readBatchSize));
+            records = ops.range(streamKey, Range.unbounded(), Limit.limit().count(readBatchSize));
         } else {
-            records = ops.range(streamKey, Range.rightOpen(cursor, "+"), Limit.unlimited());
+            records = ops.range(streamKey, Range.of(Range.Bound.exclusive(cursor), Range.Bound.unbounded()), Limit.unlimited());
         }
 
         if (records == null || records.isEmpty()) {
@@ -87,7 +87,8 @@ public class TripPlanStreamableSseStore {
         String cursor = normalizeLastEventId(startAfterEventId);
         StreamOperations<String, Object, Object> ops = redisTemplate.opsForStream();
 
-        while (!stop.get()) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(180).toNanos();
+        while (!stop.get() && !Thread.currentThread().isInterrupted() && System.nanoTime() < deadline) {
             List<MapRecord<String, Object, Object>> records = ops.read(
                     StreamReadOptions.empty()
                             .count(readBatchSize)
@@ -95,10 +96,15 @@ public class TripPlanStreamableSseStore {
                     StreamOffset.create(streamKey, ReadOffset.from(cursor)));
 
             if (records == null || records.isEmpty()) {
-                if (isFinished(taskId)) {
+                if (!isFinished(taskId)) {
+                    continue;
+                }
+                // 空读取与 DONE 状态之间可能刚写入最后一批事件，退出前再读取一次。
+                records = ops.read(StreamReadOptions.empty().count(readBatchSize),
+                        StreamOffset.create(streamKey, ReadOffset.from(cursor)));
+                if (records == null || records.isEmpty()) {
                     return;
                 }
-                continue;
             }
 
             for (MapRecord<String, Object, Object> record : records) {
@@ -107,7 +113,7 @@ public class TripPlanStreamableSseStore {
                 }
                 try {
                     cursor = emitRecord(emitter, record);
-                } catch (IOException e) {
+                } catch (IOException | IllegalStateException e) {
                     stop.set(true);
                     return;
                 }
@@ -127,7 +133,7 @@ public class TripPlanStreamableSseStore {
     public boolean hasAnyEvent(String taskId) {
         String streamKey = streamKey(taskId);
         StreamOperations<String, Object, Object> ops = redisTemplate.opsForStream();
-        List<MapRecord<String, Object, Object>> records = ops.range(streamKey, Range.unbounded(), Limit.of(1));
+        List<MapRecord<String, Object, Object>> records = ops.range(streamKey, Range.unbounded(), Limit.limit().count(1));
         return records != null && !records.isEmpty();
     }
 

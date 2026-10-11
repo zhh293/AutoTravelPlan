@@ -4,7 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zhh.handsome.gaodemcptest.model.AmapPoiUtils;
 import com.zhh.handsome.gaodemcptest.model.TripPlanItem;
-import jakarta.servlet.http.HttpServletResponse;
+import jakarta.annotation.PreDestroy;
+import org.apache.http.client.config.RequestConfig;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import reactor.core.publisher.Mono;
+import java.time.Duration;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 //import org.apache.dubbo.config.annotation.DubboService;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
@@ -20,8 +26,9 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.core.task.TaskExecutor;
@@ -34,7 +41,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.UUID;
 
 @Service
@@ -58,13 +64,21 @@ public class TripPlanServiceImpl implements TripPlanService {
 
     private final AmapPoiUtils amapPoiUtils;
 
-    private final CloseableHttpClient httpClient = HttpClients.createDefault();
+    private final CloseableHttpClient httpClient = HttpClients.custom().setDefaultRequestConfig(RequestConfig.custom()
+            .setConnectTimeout(5000).setConnectionRequestTimeout(5000).setSocketTimeout(10000).build()).build();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ChatModel chatModel;
     private final TaskExecutor taskExecutor;
     private final TripPlanStreamableSseStore streamableSseStore;
     private final Map<String, AtomicBoolean> runningTasks = new ConcurrentHashMap<>();
     private final Map<SseEmitter, String> emitterTaskMap = new ConcurrentHashMap<>();
+    private final Map<SseEmitter, AtomicBoolean> connectionStops = new ConcurrentHashMap<>();
+    private final ThreadPoolTaskExecutor sseReaderExecutor = new ThreadPoolTaskExecutor();
+
+    @Value("${trip.plan.max-duration-seconds:120}")
+    private long maxDurationSeconds = 120;
+    @Value("${trip.plan.ai-idle-timeout-seconds:45}")
+    private long aiIdleTimeoutSeconds = 45;
 
     public TripPlanServiceImpl(
             AmapPoiUtils amapPoiUtils,
@@ -75,182 +89,172 @@ public class TripPlanServiceImpl implements TripPlanService {
         this.chatModel = chatModel;
         this.taskExecutor = tripTaskExecutor;
         this.streamableSseStore = streamableSseStore;
+        sseReaderExecutor.setCorePoolSize(8);
+        sseReaderExecutor.setMaxPoolSize(8);
+        sseReaderExecutor.setQueueCapacity(32);
+        sseReaderExecutor.setThreadNamePrefix("trip-sse-");
+        sseReaderExecutor.initialize();
     }
 
     public SseEmitter streamPlan(TripPlanItem tripPlanItem, int days, String preference, String taskId,
             String lastEventId) {
+        if (tripPlanItem == null || !StringUtils.hasText(tripPlanItem.getCity()) || days < 1 || days > 30
+                || tripPlanItem.getLng() == null || tripPlanItem.getLat() == null
+                || !Double.isFinite(tripPlanItem.getLng()) || !Double.isFinite(tripPlanItem.getLat())
+                || Math.abs(tripPlanItem.getLng()) > 180 || Math.abs(tripPlanItem.getLat()) > 90) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "城市、经纬度和行程天数（1～30）必须有效");
+        }
         String city = tripPlanItem.getCity();
         String currentTaskId = StringUtils.hasText(taskId) ? taskId : UUID.randomUUID().toString();
-        log.info("开始生成行程：{}，{}，{}", city, days, preference);
-        // 1. 初始化SSE，设置超时时间
-        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
-        emitterTaskMap.put(emitter, currentTaskId);
-        // 2. 注册SSE回调，避免资源泄漏
-        registerSseCallbacks(emitter);
-
-        taskExecutor.execute(() -> resumeHistoryAndTailRealtime(emitter, currentTaskId, lastEventId));
-
-        boolean hasTaskId = StringUtils.hasText(taskId);
-        if (hasTaskId && (runningTasks.containsKey(currentTaskId) || streamableSseStore.hasAnyEvent(currentTaskId))) {
-            return emitter;
+        SseEmitter connection = new SseEmitter(SSE_TIMEOUT);
+        AtomicBoolean stop = new AtomicBoolean(false);
+        connectionStops.put(connection, stop);
+        registerSseCallbacks(connection);
+        try {
+            // 独立线程池读取 Redis；生成端只写入事件，不直接发送到连接。
+            sseReaderExecutor.execute(() -> resumeHistoryAndTailRealtime(connection, currentTaskId, lastEventId));
+            boolean existing = StringUtils.hasText(taskId) && streamableSseStore.hasAnyEvent(currentTaskId);
+            AtomicBoolean reservation = new AtomicBoolean(true);
+            if (!existing && runningTasks.putIfAbsent(currentTaskId, reservation) == null) {
+                try {
+                    long deadline = System.nanoTime() + Duration.ofSeconds(maxDurationSeconds).toNanos();
+                    taskExecutor.execute(() -> generatePlan(tripPlanItem, days, preference, currentTaskId,
+                            reservation, deadline));
+                } catch (RuntimeException ex) {
+                    runningTasks.remove(currentTaskId, reservation);
+                    throw ex;
+                }
+            }
+        } catch (RuntimeException ex) {
+            closeConnection(connection);
+            connection.completeWithError(ex);
+            if (ex instanceof java.util.concurrent.RejectedExecutionException) {
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "行程服务繁忙，请稍后重试", ex);
+            }
+            throw ex;
         }
+        return connection;
+    }
 
-        taskExecutor.execute(() -> {
-            AtomicBoolean running = runningTasks.computeIfAbsent(currentTaskId, k -> new AtomicBoolean(false));
-            if (!running.compareAndSet(false, true)) {
+    private void generatePlan(TripPlanItem tripPlanItem, int days, String preference, String currentTaskId,
+            AtomicBoolean reservation, long deadline) {
+        String city = tripPlanItem.getCity();
+        // 该 emitter 仅用作现有事件写入方法的任务上下文，不绑定 HTTP 连接。
+        SseEmitter emitter = new SseEmitter();
+        emitterTaskMap.put(emitter, currentTaskId);
+        try {
+            checkDeadline(deadline);
+            log.info("开始生成行程, taskId={}, city={}, days={}", currentTaskId, city, days);
+            sendTaskMeta(emitter, currentTaskId);
+            // 获取城市景点
+            // List<Map<String, Object>> spots = getCityScenicSpots(city);
+            List<Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(tripPlanItem.getLng(),
+                    tripPlanItem.getLat());
+            if (spots.isEmpty()) {
+                sendError(emitter, "未获取到[" + city + "]的景点数据");
                 return;
             }
-            try {
-                sendTaskMeta(emitter, currentTaskId);
-                // 校验入参
-                if (!StringUtils.hasText(city) || days < 1) {
-                    sendError(emitter, "参数错误：城市不能为空，天数需≥1");
-                    streamableSseStore.markFinished(currentTaskId);
-                    completeEmitter(emitter);
-                    return;
-                }
 
-                // 获取城市景点
-                // List<Map<String, Object>> spots = getCityScenicSpots(city);
-                List<Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(tripPlanItem.getLng(),
-                        tripPlanItem.getLat());
-                if (spots.isEmpty()) {
-                    sendError(emitter, "未获取到[" + city + "]的景点数据");
-                    streamableSseStore.markFinished(currentTaskId);
-                    completeEmitter(emitter);
-                    return;
-                }
+            // 天气
+            List<Map<String, Object>> weather = getWeatherForecast(city, Math.min(2, days));
+            log.info("获取天气数据：{}", weather);
+            if (!weather.isEmpty()) {
+                Map<String, Object> weatherPayload = new HashMap<>();
+                weatherPayload.put("city", city);
+                weatherPayload.put("days", weather);
+                sendWeather(emitter, weatherPayload);
+            }
 
-                // 天气
-                List<Map<String, Object>> weather = getWeatherForecast(city, Math.min(2, days));
-                log.info("获取天气数据：{}", weather);
-                if (!weather.isEmpty()) {
-                    Map<String, Object> weatherPayload = new HashMap<>();
-                    weatherPayload.put("city", city);
-                    weatherPayload.put("days", weather);
-                    sendWeather(emitter, weatherPayload);
-                }
+            // 初始化每日景点/颜色配置
+            String[] colors = new String[] { "#FF5733", "#33A1FF", "#33FF57", "#FF33A1", "#FFA533" };
+            // 修正：每日景点数=总景点数/天数，避免超出总数
+            int desiredPerDay = Math.max(1, Math.min(4, spots.size() / days));
+            Map<Integer, List<Map<String, Object>>> daySpots = new ConcurrentHashMap<>();
+            Map<Integer, String> dayColor = new ConcurrentHashMap<>();
+            for (int d = 1; d <= days; d++) {
+                daySpots.put(d, new ArrayList<>());
+                dayColor.put(d, colors[(d - 1) % colors.length]);
+            }
 
-                // 初始化每日景点/颜色配置
-                String[] colors = new String[] { "#FF5733", "#33A1FF", "#33FF57", "#FF33A1", "#FFA533" };
-                // 修正：每日景点数=总景点数/天数，避免超出总数
-                int desiredPerDay = Math.max(1, Math.min(4, spots.size() / days));
-                Map<Integer, List<Map<String, Object>>> daySpots = new ConcurrentHashMap<>();
-                Map<Integer, String> dayColor = new ConcurrentHashMap<>();
-                for (int d = 1; d <= days; d++) {
-                    daySpots.put(d, new ArrayList<>());
-                    dayColor.put(d, colors[(d - 1) % colors.length]);
-                }
-
-                // 构建AI Prompt
-                String prompt = buildPrompt(tripPlanItem, days, preference, spots, dayColor);
-                log.info("构建Prompt：{}", prompt);
-                AtomicBoolean done = new AtomicBoolean(false);
-                StringBuilder buf = new StringBuilder();
-                AtomicInteger consumedLen = new AtomicInteger(0); // 原子整数，避免多线程问题
-                List<String> completeJsonList = new ArrayList<>();
-                // 替换原有的chatModel.stream.subscribe(...)部分，重点看缓冲区处理和增量解析
-                int lastProcessedPosition = 0;
-                int lastLeftBracketCount = 0;
-                int lastRightBracketCount = 0;
-                Map<String, Integer> lastProcessedJson = new HashMap<>();
-                lastProcessedJson.put("lastProcessedPosition", lastProcessedPosition);
-                lastProcessedJson.put("lastLeftBracketCount", lastLeftBracketCount);
-                lastProcessedJson.put("lastRightBracketCount", lastRightBracketCount);
-                chatModel.stream(new Prompt(new UserMessage(prompt))).subscribe(
-                        // 正常回调：处理AI返回内容（核心重构）
-                        resp -> {
-                            try {
-                                String content = extractContent(resp);
-                                if (!StringUtils.hasText(content)) {
-                                    return;
-                                }
-
-                                // 关键1：累加流式内容到缓冲区（不拆分，只累积）
-                                synchronized (buf) {
-                                    buf.append(content);
-                                    // 关键2：尝试从缓冲区中解析"完整的JSON对象"
-                                    Map<String, Integer> map = extractCompleteJson(buf, completeJsonList,
-                                            lastProcessedJson.get("lastProcessedPosition"),
-                                            lastProcessedJson.get("lastLeftBracketCount"),
-                                            lastProcessedJson.get("lastRightBracketCount"));
-                                    lastProcessedJson.clear();
-                                    lastProcessedJson.putAll(map);
-                                    if (!completeJsonList.isEmpty()) {
-                                        // 处理每个完整的JSON
-                                        for (String completeJson : completeJsonList) {
-                                            processAiJsonFragment(completeJson, daySpots, dayColor, desiredPerDay,
-                                                    emitter);
-                                        }
-                                        completeJsonList.clear();
-                                    }
-                                }
-                            } catch (Exception e) {
-                                log.error("处理AI流式内容失败", e);
-                                sendError(emitter, "处理行程数据失败：" + e.getMessage());
-                            }
-                        },
-                        // 异常回调（不变）
-                        ex -> {
-                            log.error("AI流式调用失败", ex);
-                            sendError(emitter, "行程生成失败：" + ex.getMessage());
-                            done.set(true);
-                            completeEmitter(emitter);
-                        },
-                        // 完成回调（不变）
-                        () -> {
-                            log.info("AI行程生成完成");
-                            done.set(true);
-                            // 最后检查缓冲区是否有剩余的完整JSON（避免遗漏）
-                            synchronized (buf) {
-                                if (StringUtils.hasText(buf.toString())) {
-                                    // 使用新的括号匹配方法检查剩余的完整JSON
-                                    Map<String, Integer> finalState = extractCompleteJson(buf, completeJsonList,
-                                            lastProcessedJson.get("lastProcessedPosition"),
-                                            lastProcessedJson.get("lastLeftBracketCount"),
-                                            lastProcessedJson.get("lastRightBracketCount"));
-
-                                    lastProcessedJson.clear();
-                                    lastProcessedJson.putAll(finalState);
-
-                                    if (!completeJsonList.isEmpty()) {
-                                        completeJsonList.forEach(json -> processAiJsonFragment(json, daySpots, dayColor,
-                                                desiredPerDay, emitter));
-                                        completeJsonList.clear();
-                                    }
-                                }
-                            }
-                        });
-
-                // 等待异步处理完成
-                while (!done.get()) {
-                    try {
-                        Thread.sleep(50);
-                    } catch (InterruptedException ignored) {
+            // 构建AI Prompt
+            String prompt = buildPrompt(tripPlanItem, days, preference, spots, dayColor);
+            log.info("构建Prompt：{}", prompt);
+            StringBuilder buf = new StringBuilder();
+            List<String> completeJsonList = new ArrayList<>();
+            Map<String, Integer> state = new HashMap<>();
+            state.put("lastProcessedPosition", 0);
+            state.put("lastLeftBracketCount", 0);
+            state.put("lastRightBracketCount", 0);
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                throw new TimeoutException("行程生成超时");
+            }
+            // 关闭 Stream 会取消订阅。JSON 解析和高德调用在工作线程执行。
+            try (Stream<ChatResponse> responses = chatModel.stream(new Prompt(new UserMessage(prompt)))
+                    .timeout(Duration.ofSeconds(aiIdleTimeoutSeconds))
+                    .takeUntilOther(Mono.delay(Duration.ofNanos(remaining))
+                            .flatMap(tick -> Mono.error(new TimeoutException("行程生成超时"))))
+                    .toStream(1)) {
+                java.util.Iterator<ChatResponse> iterator = responses.iterator();
+                while (iterator.hasNext()) {
+                    checkDeadline(deadline);
+                    String content = extractContent(iterator.next());
+                    if (StringUtils.hasText(content)) {
+                        if (buf.length() + content.length() > 1_048_576) {
+                            throw new IllegalStateException("AI未完成的JSON内容超过限制");
+                        }
+                        buf.append(content);
+                        processBufferedJson(buf, completeJsonList, state, daySpots, dayColor, desiredPerDay, emitter, deadline);
                     }
                 }
-
-                // 确保在所有处理完成后才关闭SSE连接
+                checkDeadline(deadline);
+                processBufferedJson(buf, completeJsonList, state, daySpots, dayColor, desiredPerDay, emitter, deadline);
+                checkDeadline(deadline);
                 sendDone(emitter);
-                streamableSseStore.markFinished(currentTaskId);
-                completeEmitter(emitter);
-            } catch (Exception e) {
-                log.error("行程规划主流程失败", e);
-                sendError(emitter, "系统异常：" + e.getMessage());
-                streamableSseStore.markFinished(currentTaskId);
-                // 确保在异常情况下也正确关闭emitter
-                try {
-                    completeEmitter(emitter);
-                } catch (Exception ex) {
-                    log.error("关闭SSE连接失败", ex);
-                }
-            } finally {
-                running.set(false);
-                runningTasks.remove(currentTaskId, running);
             }
-        });
+        } catch (Exception ex) {
+            if (ex instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("行程生成失败, taskId={}", currentTaskId, ex);
+            try {
+                sendError(emitter, "行程生成失败，请重试");
+            } catch (RuntimeException writeError) {
+                log.error("保存失败事件失败, taskId={}", currentTaskId, writeError);
+            }
+        } finally {
+            try {
+                streamableSseStore.markFinished(currentTaskId);
+            } catch (RuntimeException ex) {
+                log.error("保存任务结束状态失败, taskId={}", currentTaskId, ex);
+            } finally {
+                emitterTaskMap.remove(emitter);
+                runningTasks.remove(currentTaskId, reservation);
+            }
+        }
+    }
 
-        return emitter;
+    private void checkDeadline(long deadline) throws InterruptedException, TimeoutException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("行程生成被中断");
+        }
+        if (System.nanoTime() >= deadline) {
+            throw new TimeoutException("行程生成超时");
+        }
+    }
+
+    private void processBufferedJson(StringBuilder buf, List<String> jsons, Map<String, Integer> state,
+            Map<Integer, List<Map<String, Object>>> daySpots, Map<Integer, String> dayColor,
+            int desiredPerDay, SseEmitter emitter, long deadline) throws InterruptedException, TimeoutException {
+        Map<String, Integer> next = extractCompleteJson(buf, jsons, state.get("lastProcessedPosition"),
+                state.get("lastLeftBracketCount"), state.get("lastRightBracketCount"));
+        state.clear();
+        state.putAll(next);
+        for (String json : jsons) {
+            checkDeadline(deadline);
+            processAiJsonFragment(json, daySpots, dayColor, desiredPerDay, emitter);
+        }
+        jsons.clear();
     }
 
     /**
@@ -707,8 +711,7 @@ public class TripPlanServiceImpl implements TripPlanService {
 
             // 处理错误信息
             if (data.containsKey("error")) {
-                sendError(emitter, String.valueOf(data.get("error")));
-                return;
+                throw new IllegalStateException("AI返回错误：" + data.get("error"));
             }
 
             // 处理当日路线完成标记
@@ -788,7 +791,7 @@ public class TripPlanServiceImpl implements TripPlanService {
             }
         } catch (Exception e) {
             log.error("处理AI JSON片段失败：{}", jsonStr, e);
-            sendError(emitter, "解析行程数据失败：" + e.getMessage());
+            throw new IllegalStateException("解析行程数据失败", e);
         }
     }
 
@@ -796,38 +799,39 @@ public class TripPlanServiceImpl implements TripPlanService {
      * 注册SSE回调，避免资源泄漏
      */
     private void registerSseCallbacks(SseEmitter emitter) {
-        // 超时回调
         emitter.onTimeout(() -> {
-            log.warn("SSE连接超时");
-            sendError(emitter, "连接超时，请重试");
+            closeConnection(emitter);
             emitter.complete();
-            emitterTaskMap.remove(emitter);
         });
+        emitter.onCompletion(() -> closeConnection(emitter));
+        emitter.onError(ex -> closeConnection(emitter));
+    }
 
-        // 完成回调
-        emitter.onCompletion(() -> {
-            log.info("SSE连接正常关闭");
-            emitterTaskMap.remove(emitter);
-        });
-
-        // 错误回调
-        emitter.onError(ex -> {
-            log.error("SSE连接异常", ex);
-            emitter.completeWithError(ex);
-            emitterTaskMap.remove(emitter);
-        });
+    private void closeConnection(SseEmitter emitter) {
+        AtomicBoolean stop = connectionStops.remove(emitter);
+        if (stop != null) {
+            stop.set(true);
+        }
     }
 
     private void resumeHistoryAndTailRealtime(SseEmitter emitter, String taskId, String lastEventId) {
+        AtomicBoolean stop = connectionStops.get(emitter);
+        if (stop == null || stop.get()) {
+            return;
+        }
         try {
-            String cursor = streamableSseStore.replayHistory(taskId, lastEventId, emitter);
-            AtomicBoolean stop = new AtomicBoolean(false);
-            streamableSseStore.streamRealtimeUntilDone(taskId, cursor, emitter, stop);
-            if (streamableSseStore.isFinished(taskId)) {
-                completeEmitter(emitter);
+            // 从指定游标持续读取同时覆盖历史与实时数据，避免历史批次丢失。
+            streamableSseStore.streamRealtimeUntilDone(taskId, lastEventId, emitter, stop);
+            if (!stop.get()) {
+                emitter.complete();
             }
-        } catch (Exception e) {
-            log.error("恢复SSE历史/实时续传失败, taskId={}", taskId, e);
+        } catch (Exception ex) {
+            if (!stop.get()) {
+                log.error("读取SSE事件失败, taskId={}", taskId, ex);
+                emitter.completeWithError(ex);
+            }
+        } finally {
+            closeConnection(emitter);
         }
     }
 
@@ -835,104 +839,43 @@ public class TripPlanServiceImpl implements TripPlanService {
      * 发送正常数据到前端
      */
     private void sendData(SseEmitter emitter, Object data) {
-        try {
-            String eventId = appendForEmitter(emitter, "trip-data", data);
-            SseEmitter.SseEventBuilder event = SseEmitter.event().data(data, MediaType.APPLICATION_JSON)
-                    .name("trip-data");
-            if (eventId != null) {
-                event.id(eventId);
-            }
-            emitter.send(event);
-        } catch (Exception e) {
-            log.error("推送SSE数据失败", e);
-        }
+        appendForEmitter(emitter, "trip-data", data);
     }
 
-    /**
-     * 发送错误信息到前端
-     */
     private void sendError(SseEmitter emitter, String message) {
-        try {
-            Map<String, Object> error = new HashMap<>();
-            error.put("error", message);
-            String eventId = appendForEmitter(emitter, "trip-error", error);
-            SseEmitter.SseEventBuilder event = SseEmitter.event().data(error, MediaType.APPLICATION_JSON)
-                    .name("trip-error");
-            if (eventId != null) {
-                event.id(eventId);
-            }
-            emitter.send(event);
-        } catch (Exception e) {
-            log.error("推送SSE错误信息失败", e);
-        }
+        Map<String, Object> error = new HashMap<>();
+        error.put("error", message);
+        appendForEmitter(emitter, "trip-error", error);
     }
 
-    /**
-     * 发送完成标记
-     */
     private void sendDone(SseEmitter emitter) {
-        try {
-            String eventId = appendForEmitter(emitter, "trip-done", "[DONE]");
-            SseEmitter.SseEventBuilder event = SseEmitter.event().data("[DONE]", MediaType.TEXT_PLAIN)
-                    .name("trip-done");
-            if (eventId != null) {
-                event.id(eventId);
-            }
-            emitter.send(event);
-        } catch (Exception e) {
-            log.error("推送SSE完成标记失败", e);
-        }
+        appendForEmitter(emitter, "trip-done", "[DONE]");
     }
 
     private void sendWeather(SseEmitter emitter, Object data) {
-        try {
-            String eventId = appendForEmitter(emitter, "trip-weather", data);
-            SseEmitter.SseEventBuilder event = SseEmitter.event().data(data, MediaType.APPLICATION_JSON)
-                    .name("trip-weather");
-            if (eventId != null) {
-                event.id(eventId);
-            }
-            emitter.send(event);
-        } catch (Exception e) {
-            log.error("推送SSE天气信息失败", e);
-        }
+        appendForEmitter(emitter, "trip-weather", data);
     }
 
     private void sendTaskMeta(SseEmitter emitter, String taskId) {
-        try {
-            Map<String, Object> meta = new HashMap<>();
-            meta.put("taskId", taskId);
-            String eventId = appendForEmitter(emitter, "trip-meta", meta);
-            SseEmitter.SseEventBuilder event = SseEmitter.event().name("trip-meta").data(meta,
-                    MediaType.APPLICATION_JSON);
-            if (eventId != null) {
-                event.id(eventId);
-            }
-            emitter.send(event);
-        } catch (Exception e) {
-            log.error("推送SSE任务元信息失败", e);
-        }
+        Map<String, Object> meta = new HashMap<>();
+        meta.put("taskId", taskId);
+        appendForEmitter(emitter, "trip-meta", meta);
     }
 
     private String appendForEmitter(SseEmitter emitter, String eventName, Object payload) {
         String taskId = emitterTaskMap.get(emitter);
         if (!StringUtils.hasText(taskId)) {
-            return null;
+            throw new IllegalStateException("任务上下文已释放");
         }
         return streamableSseStore.appendEvent(taskId, eventName, payload);
     }
 
-    /**
-     * 安全完成SSE连接
-     */
-    private void completeEmitter(SseEmitter emitter) {
-        try {
-            // 在完成前等待一小段时间，确保所有数据都被发送
-            Thread.sleep(100);
-            emitter.complete();
-        } catch (Exception e) {
-            log.error("关闭SSE连接失败", e);
-        }
+    @PreDestroy
+    public void shutdown() throws java.io.IOException {
+        connectionStops.values().forEach(stop -> stop.set(true));
+        connectionStops.clear();
+        sseReaderExecutor.shutdown();
+        httpClient.close();
     }
 
     /**
