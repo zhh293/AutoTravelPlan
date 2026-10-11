@@ -4,8 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zhh.handsome.gaodemcptest.model.AmapPoiUtils;
 import com.zhh.handsome.gaodemcptest.model.TripPlanItem;
-import jakarta.servlet.http.HttpServletResponse;
-import org.apache.dubbo.config.annotation.DubboService;
+import jakarta.annotation.PreDestroy;
+import org.apache.http.client.config.RequestConfig;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import reactor.core.publisher.Mono;
+import java.time.Duration;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
+//import org.apache.dubbo.config.annotation.DubboService;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.utils.URIBuilder;
@@ -20,12 +26,10 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
 import org.springframework.util.StringUtils;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.context.request.RequestContextHolder;
-import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.core.task.TaskExecutor;
 
@@ -37,10 +41,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.UUID;
 
 @Service
-@DubboService
+// @DubboService
 public class TripPlanServiceImpl implements TripPlanService {
     private static final Logger log = LoggerFactory.getLogger(TripPlanServiceImpl.class);
 
@@ -60,178 +64,197 @@ public class TripPlanServiceImpl implements TripPlanService {
 
     private final AmapPoiUtils amapPoiUtils;
 
-
-    private final CloseableHttpClient httpClient = HttpClients.createDefault();
+    private final CloseableHttpClient httpClient = HttpClients.custom().setDefaultRequestConfig(RequestConfig.custom()
+            .setConnectTimeout(5000).setConnectionRequestTimeout(5000).setSocketTimeout(10000).build()).build();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ChatModel chatModel;
     private final TaskExecutor taskExecutor;
+    private final TripPlanStreamableSseStore streamableSseStore;
+    private final Map<String, AtomicBoolean> runningTasks = new ConcurrentHashMap<>();
+    private final Map<SseEmitter, String> emitterTaskMap = new ConcurrentHashMap<>();
+    private final Map<SseEmitter, AtomicBoolean> connectionStops = new ConcurrentHashMap<>();
+    private final ThreadPoolTaskExecutor sseReaderExecutor = new ThreadPoolTaskExecutor();
 
-    public TripPlanServiceImpl(AmapPoiUtils amapPoiUtils, ChatModel chatModel, TaskExecutor tripTaskExecutor) {
+    @Value("${trip.plan.max-duration-seconds:120}")
+    private long maxDurationSeconds = 120;
+    @Value("${trip.plan.ai-idle-timeout-seconds:45}")
+    private long aiIdleTimeoutSeconds = 45;
+
+    public TripPlanServiceImpl(
+            AmapPoiUtils amapPoiUtils,
+            ChatModel chatModel,
+            TaskExecutor tripTaskExecutor,
+            TripPlanStreamableSseStore streamableSseStore) {
         this.amapPoiUtils = amapPoiUtils;
         this.chatModel = chatModel;
         this.taskExecutor = tripTaskExecutor;
+        this.streamableSseStore = streamableSseStore;
+        sseReaderExecutor.setCorePoolSize(8);
+        sseReaderExecutor.setMaxPoolSize(8);
+        sseReaderExecutor.setQueueCapacity(32);
+        sseReaderExecutor.setThreadNamePrefix("trip-sse-");
+        sseReaderExecutor.initialize();
     }
 
-    public SseEmitter streamPlan(TripPlanItem tripPlanItem, int days, String preference) {
+    public SseEmitter streamPlan(TripPlanItem tripPlanItem, int days, String preference, String taskId,
+            String lastEventId) {
+        if (tripPlanItem == null || !StringUtils.hasText(tripPlanItem.getCity()) || days < 1 || days > 30
+                || tripPlanItem.getLng() == null || tripPlanItem.getLat() == null
+                || !Double.isFinite(tripPlanItem.getLng()) || !Double.isFinite(tripPlanItem.getLat())
+                || Math.abs(tripPlanItem.getLng()) > 180 || Math.abs(tripPlanItem.getLat()) > 90) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "城市、经纬度和行程天数（1～30）必须有效");
+        }
         String city = tripPlanItem.getCity();
-        log.info("开始生成行程：{}，{}，{}", city, days, preference);
-        // 1. 初始化SSE，设置超时时间
-        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
-        // 设置响应头，指定UTF-8编码（关键）
-        HttpServletResponse response = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();
-        if (response != null) {
-            response.setContentType("text/event-stream; charset=utf-8");
-        }
-        if (response != null) {
-            response.setCharacterEncoding("UTF-8");
-        }
-        // 2. 注册SSE回调，避免资源泄漏
-        registerSseCallbacks(emitter);
-
-        taskExecutor.execute(() -> {
-            try {
-                // 校验入参
-                if (!StringUtils.hasText(city) || days < 1) {
-                    sendError(emitter, "参数错误：城市不能为空，天数需≥1");
-                    completeEmitter(emitter);
-                    return;
-                }
-
-                // 获取城市景点
-//                List<Map<String, Object>> spots = getCityScenicSpots(city);
-                List<Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(tripPlanItem.getLng(), tripPlanItem.getLat());
-                if (spots.isEmpty()) {
-                    sendError(emitter, "未获取到[" + city + "]的景点数据");
-                    completeEmitter(emitter);
-                    return;
-                }
-
-                // 天气
-                List<Map<String, Object>> weather = getWeatherForecast(city, Math.min(2, days));
-                log.info("获取天气数据：{}", weather);
-                if (!weather.isEmpty()) {
-                    Map<String, Object> weatherPayload = new HashMap<>();
-                    weatherPayload.put("city", city);
-                    weatherPayload.put("days", weather);
-                    sendWeather(emitter, weatherPayload);
-                }
-
-
-                // 初始化每日景点/颜色配置
-                String[] colors = new String[] { "#FF5733", "#33A1FF", "#33FF57", "#FF33A1", "#FFA533" };
-                // 修正：每日景点数=总景点数/天数，避免超出总数
-                int desiredPerDay = Math.max(1, Math.min(4, spots.size() / days));
-                Map<Integer, List<Map<String, Object>>> daySpots = new ConcurrentHashMap<>();
-                Map<Integer, String> dayColor = new ConcurrentHashMap<>();
-                for (int d = 1; d <= days; d++) {
-                    daySpots.put(d, new ArrayList<>());
-                    dayColor.put(d, colors[(d - 1) % colors.length]);
-                }
-
-                // 构建AI Prompt
-                String prompt = buildPrompt(tripPlanItem, days, preference, spots, dayColor);
-                log.info("构建Prompt：{}", prompt);
-                AtomicBoolean done = new AtomicBoolean(false);
-                StringBuilder buf = new StringBuilder();
-                AtomicInteger consumedLen = new AtomicInteger(0); // 原子整数，避免多线程问题
-                List<String> completeJsonList = new ArrayList<>();
-                // 替换原有的chatModel.stream.subscribe(...)部分，重点看缓冲区处理和增量解析
-                int lastProcessedPosition = 0;
-                int lastLeftBracketCount = 0;
-                int lastRightBracketCount = 0;
-                Map<String, Integer> lastProcessedJson = new HashMap<>();
-                lastProcessedJson.put("lastProcessedPosition", lastProcessedPosition);
-                lastProcessedJson.put("lastLeftBracketCount", lastLeftBracketCount);
-                lastProcessedJson.put("lastRightBracketCount", lastRightBracketCount);
-                chatModel.stream(new Prompt(new UserMessage(prompt))).subscribe(
-                        // 正常回调：处理AI返回内容（核心重构）
-                        resp -> {
-                            try {
-                                String content = extractContent(resp);
-                                if (!StringUtils.hasText(content)) {
-                                    return;
-                                }
-
-                                // 关键1：累加流式内容到缓冲区（不拆分，只累积）
-                                synchronized (buf) {
-                                    buf.append(content);
-                                    // 关键2：尝试从缓冲区中解析"完整的JSON对象"
-                                    Map<String, Integer> map = extractCompleteJson(buf, completeJsonList,
-                                            lastProcessedJson.get("lastProcessedPosition"),
-                                            lastProcessedJson.get("lastLeftBracketCount"),
-                                            lastProcessedJson.get("lastRightBracketCount"));
-                                    lastProcessedJson.clear();
-                                    lastProcessedJson.putAll(map);
-                                    if (!completeJsonList.isEmpty()) {
-                                        // 处理每个完整的JSON
-                                        for (String completeJson : completeJsonList) {
-                                            processAiJsonFragment(completeJson, daySpots, dayColor, desiredPerDay,
-                                                    emitter);
-                                        }
-                                        completeJsonList.clear();
-                                    }
-                                }
-                            } catch (Exception e) {
-                                log.error("处理AI流式内容失败", e);
-                                sendError(emitter, "处理行程数据失败：" + e.getMessage());
-                            }
-                        },
-                        // 异常回调（不变）
-                        ex -> {
-                            log.error("AI流式调用失败", ex);
-                            sendError(emitter, "行程生成失败：" + ex.getMessage());
-                            done.set(true);
-                            completeEmitter(emitter);
-                        },
-                        // 完成回调（不变）
-                        () -> {
-                            log.info("AI行程生成完成");
-                            done.set(true);
-                            // 最后检查缓冲区是否有剩余的完整JSON（避免遗漏）
-                            synchronized (buf) {
-                                if (StringUtils.hasText(buf.toString())) {
-                                    // 使用新的括号匹配方法检查剩余的完整JSON
-                                    Map<String, Integer> finalState = extractCompleteJson(buf, completeJsonList,
-                                        lastProcessedJson.get("lastProcessedPosition"),
-                                        lastProcessedJson.get("lastLeftBracketCount"),
-                                        lastProcessedJson.get("lastRightBracketCount"));
-
-                                    lastProcessedJson.clear();
-                                    lastProcessedJson.putAll(finalState);
-
-                                    if (!completeJsonList.isEmpty()) {
-                                        completeJsonList.forEach(json -> processAiJsonFragment(json, daySpots, dayColor,
-                                                desiredPerDay, emitter));
-                                        completeJsonList.clear();
-                                    }
-                                }
-                            }
-                        });
-
-                // 等待异步处理完成
-                while (!done.get()) {
-                    try {
-                        Thread.sleep(50);
-                    } catch (InterruptedException ignored) {
-                    }
-                }
-                
-                // 确保在所有处理完成后才关闭SSE连接
-                sendDone(emitter);
-                completeEmitter(emitter);
-            } catch (Exception e) {
-                log.error("行程规划主流程失败", e);
-                sendError(emitter, "系统异常：" + e.getMessage());
-                // 确保在异常情况下也正确关闭emitter
+        String currentTaskId = StringUtils.hasText(taskId) ? taskId : UUID.randomUUID().toString();
+        SseEmitter connection = new SseEmitter(SSE_TIMEOUT);
+        AtomicBoolean stop = new AtomicBoolean(false);
+        connectionStops.put(connection, stop);
+        registerSseCallbacks(connection);
+        try {
+            // 独立线程池读取 Redis；生成端只写入事件，不直接发送到连接。
+            sseReaderExecutor.execute(() -> resumeHistoryAndTailRealtime(connection, currentTaskId, lastEventId));
+            boolean existing = StringUtils.hasText(taskId) && streamableSseStore.hasAnyEvent(currentTaskId);
+            AtomicBoolean reservation = new AtomicBoolean(true);
+            if (!existing && runningTasks.putIfAbsent(currentTaskId, reservation) == null) {
                 try {
-                    completeEmitter(emitter);
-                } catch (Exception ex) {
-                    log.error("关闭SSE连接失败", ex);
+                    long deadline = System.nanoTime() + Duration.ofSeconds(maxDurationSeconds).toNanos();
+                    taskExecutor.execute(() -> generatePlan(tripPlanItem, days, preference, currentTaskId,
+                            reservation, deadline));
+                } catch (RuntimeException ex) {
+                    runningTasks.remove(currentTaskId, reservation);
+                    throw ex;
                 }
             }
-        });
+        } catch (RuntimeException ex) {
+            closeConnection(connection);
+            connection.completeWithError(ex);
+            if (ex instanceof java.util.concurrent.RejectedExecutionException) {
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "行程服务繁忙，请稍后重试", ex);
+            }
+            throw ex;
+        }
+        return connection;
+    }
 
-        return emitter;
+    private void generatePlan(TripPlanItem tripPlanItem, int days, String preference, String currentTaskId,
+            AtomicBoolean reservation, long deadline) {
+        String city = tripPlanItem.getCity();
+        // 该 emitter 仅用作现有事件写入方法的任务上下文，不绑定 HTTP 连接。
+        SseEmitter emitter = new SseEmitter();
+        emitterTaskMap.put(emitter, currentTaskId);
+        try {
+            checkDeadline(deadline);
+            log.info("开始生成行程, taskId={}, city={}, days={}", currentTaskId, city, days);
+            sendTaskMeta(emitter, currentTaskId);
+            // 获取城市景点
+            // List<Map<String, Object>> spots = getCityScenicSpots(city);
+            List<Map<String, Object>> spots = amapPoiUtils.getScenicSpotsAround(tripPlanItem.getLng(),
+                    tripPlanItem.getLat());
+            if (spots.isEmpty()) {
+                sendError(emitter, "未获取到[" + city + "]的景点数据");
+                return;
+            }
+
+            // 天气
+            List<Map<String, Object>> weather = getWeatherForecast(city, Math.min(2, days));
+            log.info("获取天气数据：{}", weather);
+            if (!weather.isEmpty()) {
+                Map<String, Object> weatherPayload = new HashMap<>();
+                weatherPayload.put("city", city);
+                weatherPayload.put("days", weather);
+                sendWeather(emitter, weatherPayload);
+            }
+
+            // 初始化每日景点/颜色配置
+            String[] colors = new String[] { "#FF5733", "#33A1FF", "#33FF57", "#FF33A1", "#FFA533" };
+            // 修正：每日景点数=总景点数/天数，避免超出总数
+            int desiredPerDay = Math.max(1, Math.min(4, spots.size() / days));
+            Map<Integer, List<Map<String, Object>>> daySpots = new ConcurrentHashMap<>();
+            Map<Integer, String> dayColor = new ConcurrentHashMap<>();
+            for (int d = 1; d <= days; d++) {
+                daySpots.put(d, new ArrayList<>());
+                dayColor.put(d, colors[(d - 1) % colors.length]);
+            }
+
+            // 构建AI Prompt
+            String prompt = buildPrompt(tripPlanItem, days, preference, spots, dayColor);
+            log.info("构建Prompt：{}", prompt);
+            StringBuilder buf = new StringBuilder();
+            List<String> completeJsonList = new ArrayList<>();
+            Map<String, Integer> state = new HashMap<>();
+            state.put("lastProcessedPosition", 0);
+            state.put("lastLeftBracketCount", 0);
+            state.put("lastRightBracketCount", 0);
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                throw new TimeoutException("行程生成超时");
+            }
+            // 关闭 Stream 会取消订阅。JSON 解析和高德调用在工作线程执行。
+            try (Stream<ChatResponse> responses = chatModel.stream(new Prompt(new UserMessage(prompt)))
+                    .timeout(Duration.ofSeconds(aiIdleTimeoutSeconds))
+                    .takeUntilOther(Mono.delay(Duration.ofNanos(remaining))
+                            .flatMap(tick -> Mono.error(new TimeoutException("行程生成超时"))))
+                    .toStream(1)) {
+                java.util.Iterator<ChatResponse> iterator = responses.iterator();
+                while (iterator.hasNext()) {
+                    checkDeadline(deadline);
+                    String content = extractContent(iterator.next());
+                    if (StringUtils.hasText(content)) {
+                        if (buf.length() + content.length() > 1_048_576) {
+                            throw new IllegalStateException("AI未完成的JSON内容超过限制");
+                        }
+                        buf.append(content);
+                        processBufferedJson(buf, completeJsonList, state, daySpots, dayColor, desiredPerDay, emitter, deadline);
+                    }
+                }
+                checkDeadline(deadline);
+                processBufferedJson(buf, completeJsonList, state, daySpots, dayColor, desiredPerDay, emitter, deadline);
+                checkDeadline(deadline);
+                sendDone(emitter);
+            }
+        } catch (Exception ex) {
+            if (ex instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("行程生成失败, taskId={}", currentTaskId, ex);
+            try {
+                sendError(emitter, "行程生成失败，请重试");
+            } catch (RuntimeException writeError) {
+                log.error("保存失败事件失败, taskId={}", currentTaskId, writeError);
+            }
+        } finally {
+            try {
+                streamableSseStore.markFinished(currentTaskId);
+            } catch (RuntimeException ex) {
+                log.error("保存任务结束状态失败, taskId={}", currentTaskId, ex);
+            } finally {
+                emitterTaskMap.remove(emitter);
+                runningTasks.remove(currentTaskId, reservation);
+            }
+        }
+    }
+
+    private void checkDeadline(long deadline) throws InterruptedException, TimeoutException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("行程生成被中断");
+        }
+        if (System.nanoTime() >= deadline) {
+            throw new TimeoutException("行程生成超时");
+        }
+    }
+
+    private void processBufferedJson(StringBuilder buf, List<String> jsons, Map<String, Integer> state,
+            Map<Integer, List<Map<String, Object>>> daySpots, Map<Integer, String> dayColor,
+            int desiredPerDay, SseEmitter emitter, long deadline) throws InterruptedException, TimeoutException {
+        Map<String, Integer> next = extractCompleteJson(buf, jsons, state.get("lastProcessedPosition"),
+                state.get("lastLeftBracketCount"), state.get("lastRightBracketCount"));
+        state.clear();
+        state.putAll(next);
+        for (String json : jsons) {
+            checkDeadline(deadline);
+            processAiJsonFragment(json, daySpots, dayColor, desiredPerDay, emitter);
+        }
+        jsons.clear();
     }
 
     /**
@@ -242,13 +265,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder(AMAP_PLACE_URL);
             uriBuilder.setParameter("keywords", "景点")
-                     .setParameter("city", city)
-                     .setParameter("types", SCENIC_TYPE)
-                     .setParameter("key", amapKey)
-                     .setParameter("offset", String.valueOf(AMAP_OFFSET))
-                     .setParameter("page", String.valueOf(AMAP_PAGE))
-                     .setParameter("extensions", "all")
-                     .setParameter("citylimit", "true"); // 添加citylimit参数
+                    .setParameter("city", city)
+                    .setParameter("types", SCENIC_TYPE)
+                    .setParameter("key", amapKey)
+                    .setParameter("offset", String.valueOf(AMAP_OFFSET))
+                    .setParameter("page", String.valueOf(AMAP_PAGE))
+                    .setParameter("extensions", "all")
+                    .setParameter("citylimit", "true"); // 添加citylimit参数
 
             URI uri = uriBuilder.build();
             log.info("构建的景点查询URI: {}", uri.toString());
@@ -273,7 +296,7 @@ public class TripPlanServiceImpl implements TripPlanService {
                         String location = poi.path("location").asText("");
                         String address = poi.path("address").asText("");
                         String rating = poi.path("rating").asText("");
-                        //拿到photos的json数组
+                        // 拿到photos的json数组
                         JsonNode photos = poi.path("photos");
                         String photoUrl = !photos.isEmpty() ? photos.get(0).path("url").asText("") : "";
                         // 过滤无效经纬度
@@ -314,14 +337,15 @@ public class TripPlanServiceImpl implements TripPlanService {
     /**
      * 从缓冲区中增量解析"完整的JSON对象"，剩余内容保留在缓冲区中
      * 核心逻辑：用括号匹配的方式识别完整JSON，未解析的内容保留在缓冲区中
-     * @param buf 字符串缓冲区
-     * @param completeJsonList 用于存储解析到的完整JSON对象的列表
+     * 
+     * @param buf                   字符串缓冲区
+     * @param completeJsonList      用于存储解析到的完整JSON对象的列表
      * @param lastProcessedPosition 上次处理的位置
-     * @param lastLeftBracketCount 上次处理的左括号计数
+     * @param lastLeftBracketCount  上次处理的左括号计数
      * @param lastRightBracketCount 上次处理的右括号计数
      * @return 包含更新后状态的映射
      */
-    private Map<String, Integer> extractCompleteJson(StringBuilder buf, List<String> completeJsonList, 
+    private Map<String, Integer> extractCompleteJson(StringBuilder buf, List<String> completeJsonList,
             int lastProcessedPosition, int lastLeftBracketCount, int lastRightBracketCount) {
         Map<String, Integer> result = new HashMap<>();
 
@@ -341,15 +365,15 @@ public class TripPlanServiceImpl implements TripPlanService {
             } else if (c == '}') {
                 lastRightBracketCount++;
             }
-            
+
             // 当左右括号数量相等且大于0时，说明找到了一个完整的JSON对象
             if (lastLeftBracketCount == lastRightBracketCount && lastLeftBracketCount > 0) {
                 String completeJson = buf.substring(0, i + 1);
                 completeJsonList.add(completeJson);
-                
+
                 // 删除已处理的部分
                 buf.delete(0, i + 1);
-                
+
                 // 重置计数器，从头开始处理剩余内容
                 lastLeftBracketCount = 0;
                 lastRightBracketCount = 0;
@@ -361,7 +385,7 @@ public class TripPlanServiceImpl implements TripPlanService {
         result.put("lastProcessedPosition", i > 0 ? i : 0);
         result.put("lastLeftBracketCount", lastLeftBracketCount);
         result.put("lastRightBracketCount", lastRightBracketCount);
-        
+
         return result;
     }
 
@@ -385,13 +409,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder(AMAP_PLACE_URL);
             uriBuilder.setParameter("keywords", spotName)
-                     .setParameter("city", city)
-                     .setParameter("types", SCENIC_TYPE)
-                     .setParameter("key", amapKey)
-                     .setParameter("offset", "1")
-                     .setParameter("page", "1")
-                     .setParameter("extensions", "all")
-                     .setParameter("citylimit", "true"); // 添加citylimit参数
+                    .setParameter("city", city)
+                    .setParameter("types", SCENIC_TYPE)
+                    .setParameter("key", amapKey)
+                    .setParameter("offset", "1")
+                    .setParameter("page", "1")
+                    .setParameter("extensions", "all")
+                    .setParameter("citylimit", "true"); // 添加citylimit参数
 
             URI uri = uriBuilder.build();
             log.info("构建的景点补全URI: {}", uri.toString());
@@ -456,10 +480,10 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder(AMAP_DRIVING_URL);
             uriBuilder.setParameter("origin", origin)
-                     .setParameter("destination", destination)
-                     .setParameter("waypoints", waypoints)
-                     .setParameter("key", amapKey)
-                     .setParameter("strategy", String.valueOf(ROUTE_STRATEGY));
+                    .setParameter("destination", destination)
+                    .setParameter("waypoints", waypoints)
+                    .setParameter("key", amapKey)
+                    .setParameter("strategy", String.valueOf(ROUTE_STRATEGY));
 
             URI uri = uriBuilder.build();
             log.info("构建的路线规划URI: {}", uri.toString());
@@ -532,49 +556,50 @@ public class TripPlanServiceImpl implements TripPlanService {
         String city = tripPlanItem.getCity();
         String title = tripPlanItem.getTitle();
         // 简化Prompt，避免过长；明确JSON格式要求
-        return String.format("""
-                你是专业的旅游行程规划师，请以%s城市的%s景点为中心(若中心景点名字与城市名字一样的话则忽略景点，若景点名字和城市名字不一样的话则下文规划中一定要出现景点的名字，景点的经纬度分别是%s和%s)规划%d天的行程，偏好%s。请严格按照以下规范输出：
-                中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
-                【重要规则】
-                1. 必须为所有%d天都规划景点，不能遗漏任何一天
-                2. 仅从以下景点中选择（保留name/lng/lat/address/url字段）：%s和中心景点，即%s,中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
-                3. 每天景点按"不回头"的地理顺序排列，每天推荐3-4个景点
-                4. 每生成1个景点，仅返回1段独立的JSON，格式必须为：
-                   {"day": 数字, "spot": {"name": "景点名", "lng": 经度, "lat": 纬度, "address": "地址","url":"https://example.com"}, "color": "颜色码"}
-                5. 每天生成完所有景点后，返回1段标记完成的JSON：
-                   {"day": 数字, "isDayComplete": true, "color": "颜色码"}
-                6. 不同天数使用指定颜色：%s
-                7. 不要返回任何多余文字、注释、换行或符号，仅返回上述JSON片段
-                8. 严格按照以上规则执行，确保生成完整的行程规划
-                9. 必须持续生成直到所有天数的景点都规划完毕，不能提前结束
-                10.中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
-                
-                【强制约束】
-                - 只能输出JSON格式，不能输出任何其他文字
-                - JSON必须完整且语法正确
-                - 每个JSON对象必须独立完整，不能有嵌套或截断
-                - 所有字段都必须存在且类型正确
-                - day字段必须是整数，从1开始连续递增
-                - spot字段必须包含name/lng/lat/address/url五个子字段
-                - lng/lat必须是浮点数格式
-                - color必须是十六进制颜色码格式，如"#FF5733"
-                - 每天必须有isDayComplete标记才算完成
-                - 输出必须严格按照一行一个JSON对象的格式
-                
-                【错误示例】（禁止这样做）
-                1. 不要输出解释性文字：如"第一天行程如下："等
-                2. 不要输出代码块标记：如```json等
-                3. 不要合并多个JSON对象：如[{"day":1...},{"day":1...}]等
-                4. 不要缺少字段：每个景点JSON必须包含所有必需字段
-                
-                【正确示例】（严格按照此格式逐行输出）
-                {"day": 1, "spot": {"name": "故宫博物院", "lng": 116.397026, "lat": 39.918058, "address": "北京市东城区景山前街4号","url":"https://example.com"}, "color": "#FF5733"}
-                {"day": 1, "spot": {"name": "景山公园", "lng": 116.396472, "lat": 39.924091, "address": "北京市东城区景山前街44号","url":"https://example.com"}, "color": "#FF5733"}
-                {"day": 1, "isDayComplete": true, "color": "#FF5733"}
-                {"day": 2, "spot": {"name": "颐和园", "lng": 116.273503, "lat": 39.999612, "address": "北京市海淀区新建宫门路19号","url":"https://example.com"}, "color": "#33A1FF"}
-                {"day": 2, "spot": {"name": "圆明园遗址公园", "lng": 116.306348, "lat": 40.001602, "address": "北京市海淀区清华西路28号","url":"https://example.com"}, "color": "#33A1FF"}
-                {"day": 2, "isDayComplete": true, "color": "#33A1FF"}
-                """,
+        return String.format(
+                """
+                        你是专业的旅游行程规划师，请以%s城市的%s景点为中心(若中心景点名字与城市名字一样的话则忽略景点，若景点名字和城市名字不一样的话则下文规划中一定要出现景点的名字，景点的经纬度分别是%s和%s)规划%d天的行程，偏好%s。请严格按照以下规范输出：
+                        中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
+                        【重要规则】
+                        1. 必须为所有%d天都规划景点，不能遗漏任何一天
+                        2. 仅从以下景点中选择（保留name/lng/lat/address/url字段）：%s和中心景点，即%s,中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
+                        3. 每天景点按"不回头"的地理顺序排列，每天推荐3-4个景点
+                        4. 每生成1个景点，仅返回1段独立的JSON，格式必须为：
+                           {"day": 数字, "spot": {"name": "景点名", "lng": 经度, "lat": 纬度, "address": "地址","url":"https://example.com"}, "color": "颜色码"}
+                        5. 每天生成完所有景点后，返回1段标记完成的JSON：
+                           {"day": 数字, "isDayComplete": true, "color": "颜色码"}
+                        6. 不同天数使用指定颜色：%s
+                        7. 不要返回任何多余文字、注释、换行或符号，仅返回上述JSON片段
+                        8. 严格按照以上规则执行，确保生成完整的行程规划
+                        9. 必须持续生成直到所有天数的景点都规划完毕，不能提前结束
+                        10.中心景点与城市名不一样则一定要出现在某一天的规划当中！！！！！！！！！！！！
+
+                        【强制约束】
+                        - 只能输出JSON格式，不能输出任何其他文字
+                        - JSON必须完整且语法正确
+                        - 每个JSON对象必须独立完整，不能有嵌套或截断
+                        - 所有字段都必须存在且类型正确
+                        - day字段必须是整数，从1开始连续递增
+                        - spot字段必须包含name/lng/lat/address/url五个子字段
+                        - lng/lat必须是浮点数格式
+                        - color必须是十六进制颜色码格式，如"#FF5733"
+                        - 每天必须有isDayComplete标记才算完成
+                        - 输出必须严格按照一行一个JSON对象的格式
+
+                        【错误示例】（禁止这样做）
+                        1. 不要输出解释性文字：如"第一天行程如下："等
+                        2. 不要输出代码块标记：如```json等
+                        3. 不要合并多个JSON对象：如[{"day":1...},{"day":1...}]等
+                        4. 不要缺少字段：每个景点JSON必须包含所有必需字段
+
+                        【正确示例】（严格按照此格式逐行输出）
+                        {"day": 1, "spot": {"name": "故宫博物院", "lng": 116.397026, "lat": 39.918058, "address": "北京市东城区景山前街4号","url":"https://example.com"}, "color": "#FF5733"}
+                        {"day": 1, "spot": {"name": "景山公园", "lng": 116.396472, "lat": 39.924091, "address": "北京市东城区景山前街44号","url":"https://example.com"}, "color": "#FF5733"}
+                        {"day": 1, "isDayComplete": true, "color": "#FF5733"}
+                        {"day": 2, "spot": {"name": "颐和园", "lng": 116.273503, "lat": 39.999612, "address": "北京市海淀区新建宫门路19号","url":"https://example.com"}, "color": "#33A1FF"}
+                        {"day": 2, "spot": {"name": "圆明园遗址公园", "lng": 116.306348, "lat": 40.001602, "address": "北京市海淀区清华西路28号","url":"https://example.com"}, "color": "#33A1FF"}
+                        {"day": 2, "isDayComplete": true, "color": "#33A1FF"}
+                        """,
                 city,
                 title,
                 tripPlanItem.getLat(),
@@ -592,13 +617,13 @@ public class TripPlanServiceImpl implements TripPlanService {
             if (resp == null || resp.getResults() == null || resp.getResults().isEmpty()) {
                 return null;
             }
-            
+
             // 修复空指针异常：检查getText()返回值是否为null
             String text = resp.getResults().get(0).getOutput().getText();
             if (text == null) {
                 return null;
             }
-            
+
             // 提取内容并过滤：去除首尾空格、换行、制表符
             String content = text.replaceAll("\\n+", "")
                     .replaceAll("\\t+", "");
@@ -654,13 +679,13 @@ public class TripPlanServiceImpl implements TripPlanService {
         if (!StringUtils.hasText(jsonStr)) {
             return false;
         }
-        
+
         // 基本格式检查
         jsonStr = jsonStr.trim();
         if (!jsonStr.startsWith("{") || !jsonStr.endsWith("}")) {
             return false;
         }
-        
+
         try {
             mapper.readTree(jsonStr);
             return true;
@@ -681,13 +706,12 @@ public class TripPlanServiceImpl implements TripPlanService {
                 log.warn("AI返回无效JSON：{}", jsonStr);
                 return;
             }
-            
+
             Map<String, Object> data = mapper.readValue(jsonStr, Map.class);
 
             // 处理错误信息
             if (data.containsKey("error")) {
-                sendError(emitter, String.valueOf(data.get("error")));
-                return;
+                throw new IllegalStateException("AI返回错误：" + data.get("error"));
             }
 
             // 处理当日路线完成标记
@@ -721,20 +745,20 @@ public class TripPlanServiceImpl implements TripPlanService {
                 log.warn("AI返回数据缺少day字段：{}", jsonStr);
                 return;
             }
-            
+
             if (!StringUtils.hasText(color)) {
                 log.warn("AI返回数据缺少color字段或color为空：{}", jsonStr);
                 return;
             }
-            
+
             if (spotObj == null) {
                 log.warn("AI返回数据缺少spot字段：{}", jsonStr);
                 return;
             }
-            
+
             // 验证spot对象的必需字段
-            if (!spotObj.containsKey("name") || !spotObj.containsKey("lng") || 
-                !spotObj.containsKey("lat") || !spotObj.containsKey("address")) {
+            if (!spotObj.containsKey("name") || !spotObj.containsKey("lng") ||
+                    !spotObj.containsKey("lat") || !spotObj.containsKey("address")) {
                 log.warn("AI返回的spot对象缺少必要字段：{}", jsonStr);
                 return;
             }
@@ -767,7 +791,7 @@ public class TripPlanServiceImpl implements TripPlanService {
             }
         } catch (Exception e) {
             log.error("处理AI JSON片段失败：{}", jsonStr, e);
-            sendError(emitter, "解析行程数据失败：" + e.getMessage());
+            throw new IllegalStateException("解析行程数据失败", e);
         }
     }
 
@@ -775,80 +799,83 @@ public class TripPlanServiceImpl implements TripPlanService {
      * 注册SSE回调，避免资源泄漏
      */
     private void registerSseCallbacks(SseEmitter emitter) {
-        // 超时回调
         emitter.onTimeout(() -> {
-            log.warn("SSE连接超时");
-            sendError(emitter, "连接超时，请重试");
+            closeConnection(emitter);
             emitter.complete();
         });
+        emitter.onCompletion(() -> closeConnection(emitter));
+        emitter.onError(ex -> closeConnection(emitter));
+    }
 
-        // 完成回调
-        emitter.onCompletion(() -> log.info("SSE连接正常关闭"));
+    private void closeConnection(SseEmitter emitter) {
+        AtomicBoolean stop = connectionStops.remove(emitter);
+        if (stop != null) {
+            stop.set(true);
+        }
+    }
 
-        // 错误回调
-        emitter.onError(ex -> {
-            log.error("SSE连接异常", ex);
-            emitter.completeWithError(ex);
-        });
+    private void resumeHistoryAndTailRealtime(SseEmitter emitter, String taskId, String lastEventId) {
+        AtomicBoolean stop = connectionStops.get(emitter);
+        if (stop == null || stop.get()) {
+            return;
+        }
+        try {
+            // 从指定游标持续读取同时覆盖历史与实时数据，避免历史批次丢失。
+            streamableSseStore.streamRealtimeUntilDone(taskId, lastEventId, emitter, stop);
+            if (!stop.get()) {
+                emitter.complete();
+            }
+        } catch (Exception ex) {
+            if (!stop.get()) {
+                log.error("读取SSE事件失败, taskId={}", taskId, ex);
+                emitter.completeWithError(ex);
+            }
+        } finally {
+            closeConnection(emitter);
+        }
     }
 
     /**
      * 发送正常数据到前端
      */
     private void sendData(SseEmitter emitter, Object data) {
-        try {
-            String jsonData = mapper.writeValueAsString(data);
-            emitter.send(SseEmitter.event().data(jsonData, MediaType.APPLICATION_JSON).name("trip-data"));
-        } catch (Exception e) {
-            log.error("推送SSE数据失败", e);
-        }
+        appendForEmitter(emitter, "trip-data", data);
     }
 
-    /**
-     * 发送错误信息到前端
-     */
     private void sendError(SseEmitter emitter, String message) {
-        try {
-            Map<String, Object> error = new HashMap<>();
-            error.put("error", message);
-            String jsonData = mapper.writeValueAsString(error);
-            emitter.send(SseEmitter.event().data(jsonData,MediaType.APPLICATION_JSON).name("trip-error"));
-        } catch (Exception e) {
-            log.error("推送SSE错误信息失败", e);
-        }
+        Map<String, Object> error = new HashMap<>();
+        error.put("error", message);
+        appendForEmitter(emitter, "trip-error", error);
     }
 
-    /**
-     * 发送完成标记
-     */
     private void sendDone(SseEmitter emitter) {
-        try {
-            emitter.send(SseEmitter.event().data("[DONE]",MediaType.APPLICATION_JSON).name("trip-done"));
-        } catch (Exception e) {
-            log.error("推送SSE完成标记失败", e);
-        }
+        appendForEmitter(emitter, "trip-done", "[DONE]");
     }
 
     private void sendWeather(SseEmitter emitter, Object data) {
-        try {
-            String jsonData = mapper.writeValueAsString(data);
-            emitter.send(SseEmitter.event().data(jsonData,MediaType.APPLICATION_JSON).name("trip-weather"));
-        } catch (Exception e) {
-            log.error("推送SSE天气信息失败", e);
-        }
+        appendForEmitter(emitter, "trip-weather", data);
     }
 
-    /**
-     * 安全完成SSE连接
-     */
-    private void completeEmitter(SseEmitter emitter) {
-        try {
-            // 在完成前等待一小段时间，确保所有数据都被发送
-            Thread.sleep(100);
-            emitter.complete();
-        } catch (Exception e) {
-            log.error("关闭SSE连接失败", e);
+    private void sendTaskMeta(SseEmitter emitter, String taskId) {
+        Map<String, Object> meta = new HashMap<>();
+        meta.put("taskId", taskId);
+        appendForEmitter(emitter, "trip-meta", meta);
+    }
+
+    private String appendForEmitter(SseEmitter emitter, String eventName, Object payload) {
+        String taskId = emitterTaskMap.get(emitter);
+        if (!StringUtils.hasText(taskId)) {
+            throw new IllegalStateException("任务上下文已释放");
         }
+        return streamableSseStore.appendEvent(taskId, eventName, payload);
+    }
+
+    @PreDestroy
+    public void shutdown() throws java.io.IOException {
+        connectionStops.values().forEach(stop -> stop.set(true));
+        connectionStops.clear();
+        sseReaderExecutor.shutdown();
+        httpClient.close();
     }
 
     /**
@@ -868,8 +895,8 @@ public class TripPlanServiceImpl implements TripPlanService {
         try {
             URIBuilder uriBuilder = new URIBuilder("https://restapi.amap.com/v3/weather/weatherInfo");
             uriBuilder.setParameter("city", city)
-                     .setParameter("key", amapKey)
-                     .setParameter("extensions", "all");
+                    .setParameter("key", amapKey)
+                    .setParameter("extensions", "all");
 
             URI uri = uriBuilder.build();
             log.info("构建的天气查询URI: {}", uri.toString());

@@ -7,8 +7,9 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.dubbo.common.logger.LoggerFactory;
+//import org.apache.dubbo.common.logger.LoggerFactory;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.http.impl.client.CloseableHttpClient;
@@ -35,7 +36,8 @@ import java.util.logging.Logger;
 public class AmapPoiUtils {
 
     private static final ObjectMapper mapper = new ObjectMapper();
-    private static final CloseableHttpClient httpClient = HttpClients.createDefault();
+    private static final CloseableHttpClient httpClient = HttpClients.custom().setDefaultRequestConfig(RequestConfig.custom()
+            .setConnectTimeout(5000).setConnectionRequestTimeout(5000).setSocketTimeout(10000).build()).build();
 
     // 高德API配置
     private static final String AMAP_AROUND_URL = "https://restapi.amap.com/v3/place/around"; // 周边搜索接口
